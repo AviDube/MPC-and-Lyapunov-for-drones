@@ -1,0 +1,63 @@
+<mujoco model="cf2x">
+
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0.0 0.0 0.0"/>
+  </visual>
+
+  <statistic center="0 0 0.1" extent="0.5"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="RK4"/>
+
+  <asset>
+    <mesh name="cf2_mesh" file="cf2.stl" scale="1 1 1"/>
+
+    <texture type="skybox" builtin="gradient"
+             rgb1="0.4 0.6 0.8" rgb2="0.8 0.9 1.0"
+             width="512" height="512"/>
+    <texture name="grid" type="2d" builtin="checker"
+             rgb1="0.7 0.7 0.7" rgb2="0.85 0.85 0.85"
+             width="512" height="512"/>
+    <material name="grid_mat" texture="grid"
+              texrepeat="4 4" reflectance="0.1"/>
+    <material name="drone_mat" rgba="0.5 0.5 0.5 1"
+              specular="0.3" shininess="0.4"/>
+  </asset>
+
+  <worldbody>
+    <geom name="floor" type="plane" size="5 5 0.1"
+          material="grid_mat" condim="3"/>
+
+    <body name="cf2x" pos="0 0 0.1">
+      <freejoint name="root"/>
+
+      <camera name="track_cam" mode="trackcom" pos="0 -0.5 0.3" xyaxes="1 0 0 0 1 2"/>
+
+      <inertial pos="0 0 0" mass="0.027"
+                diaginertia="1.4e-5 1.4e-5 2.17e-5"/>
+
+      <geom name="visual" type="mesh" mesh="cf2_mesh"
+            euler="0 0 0" material="drone_mat"
+            contype="0" conaffinity="0"/>
+
+      <geom name="collision" type="cylinder"
+            size="0.06 0.0125"
+            contype="1" conaffinity="1"
+            rgba="0 0 0 0"/>
+
+      <site name="rotor0" pos=" 0.028 -0.028 0" size="0.001"/>
+      <site name="rotor1" pos="-0.028 -0.028 0" size="0.001"/>
+      <site name="rotor2" pos="-0.028  0.028 0" size="0.001"/>
+      <site name="rotor3" pos=" 0.028  0.028 0" size="0.001"/>
+
+    </body>
+  </worldbody>
+
+  <actuator>
+    <general name="rotor0" site="rotor0" gear="0 0 1 0 0 -0.02513"/>
+    <general name="rotor1" site="rotor1" gear="0 0 1 0 0  0.02513"/>
+    <general name="rotor2" site="rotor2" gear="0 0 1 0 0 -0.02513"/>
+    <general name="rotor3" site="rotor3" gear="0 0 1 0 0  0.02513"/>
+  </actuator>
+
+</mujoco>
