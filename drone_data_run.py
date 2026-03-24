@@ -7,8 +7,8 @@ from scipy.spatial.transform import Rotation
 import mediapy
 
 # ── Flags ──────────────────────────────────────────────────────────────────────
-RECORD_VIDEO    = True        # set to False to skip video recording
-VIDEO_EPISODES  = [0, 1, 2]  # which episode indices to record
+RECORD_VIDEO    = True
+VIDEO_EPISODES  = [0, 1, 2]
 VIDEO_DIR       = "videos"
 VIDEO_FPS       = 30
 VIDEO_HEIGHT    = 720
@@ -19,11 +19,13 @@ XML_PATH       = "basic_quadrotor.xml"
 DT_SIM         = 0.002
 DT_CTRL        = 0.02
 STEPS_PER_CTRL = int(DT_CTRL / DT_SIM)
-T_MIN          = 0.0
+# FIX: raised T_MIN from 0.0 — prevents integral windup + clipping death spiral
+T_MIN          = 0.01
 T_MAX          = 0.15
 
 NUM_EPISODES   = 3
-EPISODE_LEN    = 200
+# FIX: extended from 200 → 400 so transient behaviour settles before episode ends
+EPISODE_LEN    = 400
 
 SAVE_PATH      = "dataset"
 os.makedirs(SAVE_PATH, exist_ok=True)
@@ -32,8 +34,17 @@ if RECORD_VIDEO:
 
 # ── Load base model ────────────────────────────────────────────────────────────
 base_model = mujoco.MjModel.from_xml_path(XML_PATH)
+# FIX: kept as a fallback only — per-episode hover is recomputed from randomized mass
 HOVER      = (base_model.body_mass[1] * abs(base_model.opt.gravity[2])) / 4
 print(f"Nominal hover thrust per rotor: {HOVER:.5f} N")
+
+# ── Hover setpoint ─────────────────────────────────────────────────────────────
+# FIX: was np.zeros(12) — drone was trying to reach z=0 (the ground)
+# State vector: [x, y, z, roll, pitch, yaw, vx, vy, vz, p, q, r]
+HOVER_SETPOINT = np.array([0.0, 0.0, 0.2,
+                            0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0,
+                            0.0, 0.0, 0.0], dtype=np.float32)
 
 # ── Quaternion → Euler ─────────────────────────────────────────────────────────
 def quat_to_euler(q):
@@ -50,7 +61,8 @@ def get_error_state(data, x_ref=None):
     omega = data.qvel[3:6]
     state = np.concatenate([pos, euler, vel, omega])
     if x_ref is None:
-        x_ref = np.zeros(12)
+        # FIX: default to hover setpoint, not zeros
+        x_ref = HOVER_SETPOINT
     return state - x_ref
 
 # ── Domain randomization ───────────────────────────────────────────────────────
@@ -66,65 +78,121 @@ def make_randomized_model(xml_path):
     model.opt.viscosity *= np.random.uniform(0.80, 1.20)
     return model
 
-# ── PID controller ─────────────────────────────────────────────────────────────
+# ── PID + feedforward controller ──────────────────────────────────────────────
 class PIDController:
     def __init__(self):
-        self.kp_z  = 8.0;  self.ki_z  = 0.5;  self.kd_z  = 4.0
-        self.kp_rp = 3.0;  self.ki_rp = 0.1;  self.kd_rp = 1.5
-        self.kp_yaw = 1.0; self.kd_yaw = 0.5
+        # ── Scaled Altitude Gains ──────────────────────────────
+        self.kp_z   = 0.5;   self.ki_z  = 0.05;  self.kd_z  = 0.2
+        
+        # ── Scaled Roll / Pitch Gains ──────────────────────────
+        # kd_rp dropped significantly to stop motor "bang-bang" chatter
+        # kp_rp dropped slightly to allow smoother tilt corrections
+        self.kp_rp  = 0.05;  self.ki_rp = 0.01;  self.kd_rp = 0.005
+        
+        # ── Scaled Yaw Gains ───────────────────────────────────
+        self.kp_yaw = 0.05;  self.kd_yaw = 0.01
+        
+        # ── Feedforward Gains (Outer Loop) ─────────────────────
+        # Reduced so a 3 m/s drift doesn't command a >45 degree tilt
+        self.kff_vel_xy  = 0.10
+        self.kff_pos_att = 0.05
+        
         self.reset()
 
-    def reset(self):
-        self.int_z    = 0.0
-        self.int_rp   = np.zeros(2)
-        self.prev_z   = 0.0
-        self.prev_rp  = np.zeros(2)
-        self.prev_yaw = 0.0
+    def reset(self, hover=None):
+        # FIX: accept per-episode hover thrust so gravity comp is exact for the
+        #      randomized mass, not anchored to the base model mass
+        self.hover  = hover if hover is not None else HOVER
+        self.int_z  = 0.0
+        self.int_rp = np.zeros(2)
+        # FIX: removed prev_z / prev_rp / prev_yaw — D-terms now use velocity
+        #      states directly instead of finite-differencing positions
 
-    def __call__(self, state):
-        z, roll, pitch, yaw = state[2], state[3], state[4], state[5]
+    def __call__(self, err, debug=False):
+        # err = state - setpoint
+        e_z      = err[2]
+        e_rp     = err[3:5].copy()  
+        e_yaw    = err[5]
+        e_xy     = err[0:2]
+        vx, vy   = err[6], err[7]
+        vz       = err[8]
+        omega    = err[9:11]
+        yaw_rate = err[11]
 
-        self.int_z  += z * DT_CTRL
-        dz           = (z - self.prev_z) / DT_CTRL
-        self.prev_z  = z
-        thrust_corr  = -(self.kp_z * z + self.ki_z * self.int_z + self.kd_z * dz)
+        # ── Optional: Add an integral term for XY position to lock it in place 
+        # (Put self.int_xy = np.zeros(2) inside your reset() method if you use this)
+        if not hasattr(self, 'int_xy'):
+            self.int_xy = np.zeros(2)
+        self.int_xy += e_xy * DT_CTRL
+        self.int_xy = np.clip(self.int_xy, -1.0, 1.0) # Anti-windup
+        ki_pos = 0.01
 
-        rp           = np.array([roll, pitch])
-        self.int_rp += rp * DT_CTRL
-        drp          = (rp - self.prev_rp) / DT_CTRL
-        self.prev_rp = rp
-        rp_corr      = -(self.kp_rp * rp + self.ki_rp * self.int_rp + self.kd_rp * drp)
+        # ── 1. Outer Loop: Position to Desired Attitude (Cascade) ──────────
+        pos_scale = min(1.0, 0.2 / (np.linalg.norm(e_xy) + 1e-6))
+        
+        # PITCH (RotX) controls Y-position. 
+        # Needs POSITIVE rotation to fix positive Y-error (Pitch Back to move Back)
+        desired_x_rot = (e_xy[1] * self.kff_pos_att * pos_scale) + (vy * self.kff_vel_xy) + (self.int_xy[1] * ki_pos)
 
-        dyaw          = (yaw - self.prev_yaw) / DT_CTRL
-        self.prev_yaw = yaw
-        yaw_corr      = -(self.kp_yaw * yaw + self.kd_yaw * dyaw)
+        # ROLL (RotY) controls X-position. 
+        # Needs NEGATIVE rotation to fix positive X-error (Roll Left to move Left)
+        desired_y_rot = -(e_xy[0] * self.kff_pos_att * pos_scale) - (vx * self.kff_vel_xy) - (self.int_xy[0] * ki_pos)
 
-        base = HOVER + thrust_corr
+        e_rp[0] -= desired_x_rot
+        e_rp[1] -= desired_y_rot
+
+        # ── 2. Inner Loop: Feedback (PID) for Attitude ─────────────────────
+        self.int_z  += e_z  * DT_CTRL
+        thrust_corr  = -(self.kp_z  * e_z  + self.ki_z  * self.int_z  + self.kd_z  * vz)
+
+        self.int_rp += e_rp * DT_CTRL
+        rp_corr      = -(self.kp_rp * e_rp + self.ki_rp * self.int_rp + self.kd_rp * omega)
+
+        yaw_corr     = -(self.kp_yaw * e_yaw + self.kd_yaw * yaw_rate)
+
+        # ── 3. Motor Mixing ────────────────────────────────────────────────
+        base = self.hover + thrust_corr
         u = np.array([
-            base + rp_corr[1] - rp_corr[0] - yaw_corr,
-            base - rp_corr[1] + rp_corr[0] - yaw_corr,
-            base - rp_corr[1] - rp_corr[0] + yaw_corr,
-            base + rp_corr[1] + rp_corr[0] + yaw_corr,
+            base - rp_corr[0] - rp_corr[1] - yaw_corr,
+            base - rp_corr[0] + rp_corr[1] + yaw_corr,
+            base + rp_corr[0] + rp_corr[1] - yaw_corr,
+            base + rp_corr[0] - rp_corr[1] + yaw_corr,
         ])
-        return np.clip(u, T_MIN, T_MAX)
+        
+        u_clipped = np.clip(u, T_MIN, T_MAX)
+
+        # ── Debug Logging ──────────────────────────────────────────────────
+        if debug:
+            print(f"\n--- Controller Debug Log ---")
+            print(f"Pos Err (X, Y):    [{e_xy[0]:+.3f}, {e_xy[1]:+.3f}]")
+            print(f"Vel (Vx, Vy):      [{vx:+.3f}, {vy:+.3f}]")
+            print(f"Desired Attitude:  Roll: {desired_roll:+.3f}, Pitch: {desired_pitch:+.3f}")
+            print(f"Att Err (Inner):   Roll: {e_rp[0]:+.3f}, Pitch: {e_rp[1]:+.3f}")
+            print(f"PID Torque Out:    Roll: {rp_corr[0]:+.3f}, Pitch: {rp_corr[1]:+.3f}")
+            print(f"Motor Cmd (Raw):   {np.round(u, 3)}")
+            print(f"Motor Cmd (Clip):  {np.round(u_clipped, 3)}")
+            print(f"----------------------------")
+
+        return u_clipped
 
 # ── Random initial state ───────────────────────────────────────────────────────
 def sample_initial_state(data, model):
     mujoco.mj_resetData(model, data)
-    data.qpos[0] = np.random.uniform(-0.3,  0.3)
-    data.qpos[1] = np.random.uniform(-0.3,  0.3)
-    data.qpos[2] = np.random.uniform( 0.05, 0.35)
-    roll  = np.random.uniform(-np.deg2rad(15), np.deg2rad(15))
-    pitch = np.random.uniform(-np.deg2rad(15), np.deg2rad(15))
-    yaw   = np.random.uniform(-np.deg2rad(15), np.deg2rad(15))
+    data.qpos[0] = 0 # np.random.uniform(-0.3,  0.3)
+    data.qpos[1] = 0 # np.random.uniform(-0.3,  0.3)
+    # FIX: spawn near the hover setpoint altitude (0.2 m), not far from it
+    data.qpos[2] = np.random.uniform(0.1, 0.4)
+    roll  = 0 # np.random.uniform(-np.deg2rad(15), np.deg2rad(15))
+    pitch = 0 # np.random.uniform(-np.deg2rad(15), np.deg2rad(15))
+    yaw   = 0 # np.random.uniform(-np.deg2rad(15), np.deg2rad(15))
     r     = Rotation.from_euler("xyz", [roll, pitch, yaw])
     quat  = r.as_quat()
     data.qpos[3] = quat[3]
     data.qpos[4] = quat[0]
     data.qpos[5] = quat[1]
     data.qpos[6] = quat[2]
-    data.qvel[:3]  = np.random.uniform(-0.2, 0.2, 3)
-    data.qvel[3:6] = np.random.uniform(-0.1, 0.1, 3)
+    data.qvel[:3]  = np.random.uniform(0, 0, 3)
+    data.qvel[3:6] = np.random.uniform(0, 0, 3)
 
 # ── Safety check ───────────────────────────────────────────────────────────────
 def is_safe(data):
@@ -141,17 +209,18 @@ def make_renderer(model):
 # ── Episode runner ─────────────────────────────────────────────────────────────
 def run_episode(controller, episode_idx):
     model = make_randomized_model(XML_PATH)
+    hover = (model.body_mass[1] * abs(model.opt.gravity[2])) / 4
     data  = mujoco.MjData(model)
-    controller.reset()
+    controller.reset(hover)
     sample_initial_state(data, model)
 
-    record_this = RECORD_VIDEO and (episode_idx in VIDEO_EPISODES)
-    renderer    = make_renderer(model) if record_this else None
-    frames      = [] if record_this else None
+    record_this     = RECORD_VIDEO and (episode_idx in VIDEO_EPISODES)
+    renderer        = make_renderer(model) if record_this else None
+    frames          = [] if record_this else None
     steps_per_frame = int((1.0 / VIDEO_FPS) / DT_SIM)
 
-    transitions  = []
-    sim_step     = 0
+    transitions = []
+    sim_step    = 0
 
     for step in range(EPISODE_LEN):
         e_k = get_error_state(data)
@@ -169,14 +238,14 @@ def run_episode(controller, episode_idx):
 
         data.qvel[:] += np.random.normal(0, 1e-4, data.qvel.shape)
 
-        # if not is_safe(data):
-        #     print(f"  Episode {episode_idx}: safety abort at step {step}")
-        #     break
+        if not is_safe(data):
+            print(f"  Episode {episode_idx}: safety abort at step {step}")
+            break
 
         e_k1 = get_error_state(data)
         transitions.append((e_k, u, e_k1))
 
-    if record_this and len(frames) > 0:
+    if record_this and frames and len(frames) > 0:
         renderer.close()
         path = f"{VIDEO_DIR}/episode_{episode_idx:04d}.mp4"
         mediapy.write_video(path, frames, fps=VIDEO_FPS)
@@ -234,7 +303,7 @@ print(f"  actions:     {actions.shape}")
 print(f"  next_states: {next_states.shape}")
 print(f"  aborted:     {aborted}/{NUM_EPISODES}")
 
-labels = ["x","y","roll","pitch","yaw","vx","vy","vz","p","q","r"]
+labels = ["x", "y", "z", "roll", "pitch", "yaw", "vx", "vy", "vz", "p", "q", "r"]
 print("\nState coverage (min / mean / max):")
 for i, label in enumerate(labels):
     print(f"  {label:6s}: [{states[:,i].min():+.3f}, "
