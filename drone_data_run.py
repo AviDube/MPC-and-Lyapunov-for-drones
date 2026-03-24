@@ -19,12 +19,10 @@ XML_PATH       = "basic_quadrotor.xml"
 DT_SIM         = 0.002
 DT_CTRL        = 0.02
 STEPS_PER_CTRL = int(DT_CTRL / DT_SIM)
-# FIX: raised T_MIN from 0.0 — prevents integral windup + clipping death spiral
 T_MIN          = 0.01
 T_MAX          = 0.15
 
 NUM_EPISODES   = 3
-# FIX: extended from 200 → 400 so transient behaviour settles before episode ends
 EPISODE_LEN    = 400
 
 SAVE_PATH      = "dataset"
@@ -34,12 +32,10 @@ if RECORD_VIDEO:
 
 # ── Load base model ────────────────────────────────────────────────────────────
 base_model = mujoco.MjModel.from_xml_path(XML_PATH)
-# FIX: kept as a fallback only — per-episode hover is recomputed from randomized mass
 HOVER      = (base_model.body_mass[1] * abs(base_model.opt.gravity[2])) / 4
 print(f"Nominal hover thrust per rotor: {HOVER:.5f} N")
 
 # ── Hover setpoint ─────────────────────────────────────────────────────────────
-# FIX: was np.zeros(12) — drone was trying to reach z=0 (the ground)
 # State vector: [x, y, z, roll, pitch, yaw, vx, vy, vz, p, q, r]
 HOVER_SETPOINT = np.array([0.0, 0.0, 0.2,
                             0.0, 0.0, 0.0,
@@ -61,7 +57,6 @@ def get_error_state(data, x_ref=None):
     omega = data.qvel[3:6]
     state = np.concatenate([pos, euler, vel, omega])
     if x_ref is None:
-        # FIX: default to hover setpoint, not zeros
         x_ref = HOVER_SETPOINT
     return state - x_ref
 
@@ -81,32 +76,25 @@ def make_randomized_model(xml_path):
 # ── PID + feedforward controller ──────────────────────────────────────────────
 class PIDController:
     def __init__(self):
-        # ── Scaled Altitude Gains ──────────────────────────────
+        # ── Altitude Gains ──────────────────────────────
         self.kp_z   = 0.5;   self.ki_z  = 0.05;  self.kd_z  = 0.2
         
-        # ── Scaled Roll / Pitch Gains ──────────────────────────
-        # kd_rp dropped significantly to stop motor "bang-bang" chatter
-        # kp_rp dropped slightly to allow smoother tilt corrections
+        # ── Roll / Pitch Gains ──────────────────────────
         self.kp_rp  = 0.05;  self.ki_rp = 0.01;  self.kd_rp = 0.005
         
-        # ── Scaled Yaw Gains ───────────────────────────────────
+        # ── Yaw Gains ───────────────────────────────────
         self.kp_yaw = 0.05;  self.kd_yaw = 0.01
         
         # ── Feedforward Gains (Outer Loop) ─────────────────────
-        # Reduced so a 3 m/s drift doesn't command a >45 degree tilt
         self.kff_vel_xy  = 0.10
         self.kff_pos_att = 0.05
         
         self.reset()
 
     def reset(self, hover=None):
-        # FIX: accept per-episode hover thrust so gravity comp is exact for the
-        #      randomized mass, not anchored to the base model mass
         self.hover  = hover if hover is not None else HOVER
         self.int_z  = 0.0
         self.int_rp = np.zeros(2)
-        # FIX: removed prev_z / prev_rp / prev_yaw — D-terms now use velocity
-        #      states directly instead of finite-differencing positions
 
     def __call__(self, err, debug=False):
         # err = state - setpoint
@@ -132,14 +120,14 @@ class PIDController:
         
         # PITCH (RotX) controls Y-position. 
         # Needs POSITIVE rotation to fix positive Y-error (Pitch Back to move Back)
-        desired_x_rot = (e_xy[1] * self.kff_pos_att * pos_scale) + (vy * self.kff_vel_xy) + (self.int_xy[1] * ki_pos)
+        desired_pitch = (e_xy[1] * self.kff_pos_att * pos_scale) + (vy * self.kff_vel_xy) + (self.int_xy[1] * ki_pos)
 
         # ROLL (RotY) controls X-position. 
         # Needs NEGATIVE rotation to fix positive X-error (Roll Left to move Left)
-        desired_y_rot = -(e_xy[0] * self.kff_pos_att * pos_scale) - (vx * self.kff_vel_xy) - (self.int_xy[0] * ki_pos)
+        desired_roll = -(e_xy[0] * self.kff_pos_att * pos_scale) - (vx * self.kff_vel_xy) - (self.int_xy[0] * ki_pos)
 
-        e_rp[0] -= desired_x_rot
-        e_rp[1] -= desired_y_rot
+        e_rp[0] -= desired_pitch
+        e_rp[1] -= desired_roll
 
         # ── 2. Inner Loop: Feedback (PID) for Attitude ─────────────────────
         self.int_z  += e_z  * DT_CTRL
@@ -178,9 +166,8 @@ class PIDController:
 # ── Random initial state ───────────────────────────────────────────────────────
 def sample_initial_state(data, model):
     mujoco.mj_resetData(model, data)
-    data.qpos[0] = 0 # np.random.uniform(-0.3,  0.3)
+    data.qpos[0] = 0 # np.random.uniform(-0.3,  0.3) ### Values are commented out so easier to tune PID
     data.qpos[1] = 0 # np.random.uniform(-0.3,  0.3)
-    # FIX: spawn near the hover setpoint altitude (0.2 m), not far from it
     data.qpos[2] = np.random.uniform(0.1, 0.4)
     roll  = 0 # np.random.uniform(-np.deg2rad(15), np.deg2rad(15))
     pitch = 0 # np.random.uniform(-np.deg2rad(15), np.deg2rad(15))
