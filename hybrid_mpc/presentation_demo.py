@@ -38,7 +38,7 @@ from mpc_hybrid import HybridMPC, get_state, wrench_to_rotors, USE_NN
 # ═══════════════════════════════════════════════════════════════════════════════
 # Paths & constants
 # ═══════════════════════════════════════════════════════════════════════════════
-XML_PATH = "../basic_quadrotor.xml"
+XML_PATH = "../basic_quadrotor_presentation.xml"
 DT_CTRL  = 0.02
 nx, nu   = 12, 4
 
@@ -50,8 +50,6 @@ X_REF[2] = 1.2   # 1.2 m altitude
 
 # Wind-arrow geometry
 ARROW_SHAFT_RADIUS = 0.012
-ARROW_HEAD_RADIUS  = 0.030
-ARROW_HEAD_FRAC    = 0.28   # head is this fraction of total arrow length
 MIN_ARROW_LEN      = 0.05   # always draw at least this long
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -114,9 +112,8 @@ sim_state = SimState()
 # ═══════════════════════════════════════════════════════════════════════════════
 def _draw_wind_arrow(viewer, wind: np.ndarray, drone_pos: np.ndarray):
     """
-    Draws a two-part arrow (shaft cylinder + cone head) in the MuJoCo
-    scene-geometry overlay.  Origin is slightly above the drone so it
-    never clips into the body mesh.
+    Draws a single, proper arrow in the MuJoCo scene-geometry overlay.
+    Origin is slightly above the drone so it never clips into the body mesh.
     """
     mag = float(np.linalg.norm(wind))
     arrow_len = max(mag * 0.18, MIN_ARROW_LEN)  # scale with speed
@@ -129,15 +126,9 @@ def _draw_wind_arrow(viewer, wind: np.ndarray, drone_pos: np.ndarray):
     direction = wind / mag          # unit vector
 
     origin = drone_pos + np.array([0.0, 0.0, 0.12])  # just above drone CoM
-
-    shaft_len = arrow_len * (1.0 - ARROW_HEAD_FRAC)
-    head_len  = arrow_len * ARROW_HEAD_FRAC
-
-    shaft_end = origin + direction * shaft_len
-    head_end  = origin + direction * arrow_len
-
-    # Midpoint of shaft (MuJoCo capsule/cylinder is defined by its centre)
-    shaft_mid = (origin + shaft_end) / 2.0
+    
+    # Midpoint of the arrow (MuJoCo primitives are defined by their center)
+    arrow_mid = origin + direction * (arrow_len / 2.0)
 
     # ── build rotation matrix: local Z → direction ──────────────────────────
     z = direction
@@ -150,31 +141,17 @@ def _draw_wind_arrow(viewer, wind: np.ndarray, drone_pos: np.ndarray):
     # Convert to 9-element row-major flat for mujoco.mjtMat
     mat = R.flatten()
 
-    # ── draw shaft (cylinder) ───────────────────────────────────────────────
+    # ── draw built-in arrow ─────────────────────────────────────────────────
     g = viewer.user_scn.geoms[viewer.user_scn.ngeom]
     mujoco.mjv_initGeom(
         g,
-        mujoco.mjtGeom.mjGEOM_CYLINDER,
-        np.array([ARROW_SHAFT_RADIUS, ARROW_SHAFT_RADIUS, shaft_len / 2.0]),
-        shaft_mid,
+        mujoco.mjtGeom.mjGEOM_ARROW,  # Use the built-in arrow shape
+        np.array([ARROW_SHAFT_RADIUS, ARROW_SHAFT_RADIUS, arrow_len / 2.0]),
+        arrow_mid,
         mat,
         np.array([1.0, 0.55, 0.0, 0.90], dtype=np.float32),  # orange
     )
     viewer.user_scn.ngeom += 1
-
-    # ── draw arrowhead (sphere approximation for simplicity) ────────────────
-    g2 = viewer.user_scn.geoms[viewer.user_scn.ngeom]
-    head_mid = shaft_end + direction * (head_len / 2.0)
-    mujoco.mjv_initGeom(
-        g2,
-        mujoco.mjtGeom.mjGEOM_SPHERE,
-        np.array([ARROW_HEAD_RADIUS, ARROW_HEAD_RADIUS, ARROW_HEAD_RADIUS]),
-        head_mid,
-        mat,
-        np.array([1.0, 0.25, 0.0, 0.95], dtype=np.float32),  # deep orange
-    )
-    viewer.user_scn.ngeom += 1
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Simulation thread
@@ -200,10 +177,6 @@ def simulation_thread():
         viewer.cam.azimuth   = 45
         viewer.cam.lookat[:] = [0.0, 0.0, 0.6]
 
-        # Nicer ambient + shadows
-        viewer.scn.flags[mujoco.mjtRndFlag.mjRND_SHADOW]    = 1
-        viewer.scn.flags[mujoco.mjtRndFlag.mjRND_REFLECTION] = 1
-
         t_sim    = 0.0
         last_gui = time.time()
 
@@ -217,7 +190,6 @@ def simulation_thread():
                     mujoco.mj_resetData(mj_model, mj_data)
                     mj_data.qpos[2] = 0.1
                     mujoco.mj_forward(mj_model, mj_data)
-                    _integral[:]       = 0.0
                     t_sim              = 0.0
                     sim_state.reset_flag = False
 

@@ -1,0 +1,299 @@
+<mujoco model="cf2x_pro">
+
+  <!-- ═══════════════════════════════════════════════════
+       Visual & rendering settings
+  ═══════════════════════════════════════════════════ -->
+  <visual>
+    <global offwidth="1920" offheight="1080" fovy="55"/>
+    <quality shadowsize="4096" offsamples="8"/>
+    <headlight
+      diffuse="0.7 0.7 0.7"
+      ambient="0.25 0.25 0.28"
+      specular="0.15 0.15 0.15"
+      active="1"/>
+    <map shadowclip="0.05" shadowscale="0.5" znear="0.01"/>
+    <rgba haze="0.18 0.22 0.28 1"/>
+  </visual>
+
+  <statistic center="0 0 0.8" extent="2.5"/>
+
+  <!-- ═══════════════════════════════════════════════════
+       Physics options
+  ═══════════════════════════════════════════════════ -->
+  <option
+    timestep="0.002"
+    gravity="0 0 -9.81"
+    integrator="RK4"
+    density="1.225"
+    viscosity="1.8e-5"
+    wind="0 0 0"/>
+
+  <!-- ═══════════════════════════════════════════════════
+       Assets
+  ═══════════════════════════════════════════════════ -->
+  <asset>
+    <!-- Drone mesh -->
+    <mesh name="cf2_mesh" file="cf2.stl" scale="1 1 1"/>
+
+    <!-- Sky: deep blue-grey dusk gradient -->
+    <texture
+      name="skybox"
+      type="skybox"
+      builtin="gradient"
+      rgb1="0.08 0.10 0.18"
+      rgb2="0.35 0.45 0.62"
+      width="512" height="512"/>
+
+    <!-- Floor: dark polished concrete -->
+    <texture
+      name="concrete"
+      type="2d"
+      builtin="checker"
+      rgb1="0.22 0.22 0.24"
+      rgb2="0.30 0.30 0.32"
+      width="1024" height="1024"/>
+    <material
+      name="concrete_mat"
+      texture="concrete"
+      texrepeat="8 8"
+      reflectance="0.25"
+      specular="0.4"
+      shininess="0.15"/>
+
+    <!-- Perimeter wall (dark brushed steel look) -->
+    <texture
+      name="wall_tex"
+      type="2d"
+      builtin="flat"
+      rgb1="0.18 0.20 0.24"
+      width="256" height="256"/>
+    <material
+      name="wall_mat"
+      texture="wall_tex"
+      reflectance="0.05"
+      specular="0.2"
+      shininess="0.05"/>
+
+    <!-- Accent stripe on wall top edge -->
+    <material
+      name="accent_mat"
+      rgba="0.06 0.45 1.00 1"
+      specular="0.8"
+      shininess="0.6"
+      emission="0.25"/>
+
+    <!-- Drone: matte charcoal with subtle specular -->
+    <material
+      name="drone_mat"
+      rgba="0.15 0.15 0.17 1"
+      specular="0.5"
+      shininess="0.5"/>
+
+    <!-- Motor housing: bright orange accent -->
+    <material
+      name="motor_mat"
+      rgba="1.0 0.42 0.0 1"
+      specular="0.6"
+      shininess="0.4"/>
+
+    <!-- Rotor disc: translucent blue-white -->
+    <material
+      name="rotor_disc_mat"
+      rgba="0.55 0.78 1.0 0.35"
+      specular="0.2"
+      shininess="0.1"/>
+
+    <!-- Target marker: glowing cyan ring -->
+    <material
+      name="target_mat"
+      rgba="0.0 0.85 0.85 0.70"
+      emission="0.5"
+      specular="0.4"
+      shininess="0.3"/>
+
+    <!-- Grid lines overlay (subtle) -->
+    <material
+      name="grid_lines"
+      rgba="0.40 0.40 0.50 0.25"
+      emission="0.05"/>
+
+  </asset>
+
+  <!-- ═══════════════════════════════════════════════════
+       World
+  ═══════════════════════════════════════════════════ -->
+  <worldbody>
+
+    <!-- Directional key-light (top-left) -->
+    <light
+      name="key_light"
+      directional="true"
+      pos="2 -2 4"
+      dir="-0.4 0.4 -1"
+      diffuse="0.85 0.82 0.75"
+      specular="0.3 0.3 0.3"
+      castshadow="true"/>
+
+    <!-- Soft fill from right -->
+    <light
+      name="fill_light"
+      directional="true"
+      pos="-3 3 2"
+      dir="0.5 -0.5 -0.5"
+      diffuse="0.25 0.28 0.38"
+      specular="0.0 0.0 0.0"
+      castshadow="false"/>
+
+    <!-- Warm back-light rim -->
+    <light
+      name="rim_light"
+      directional="false"
+      pos="0 3 1.5"
+      diffuse="0.30 0.22 0.10"
+      specular="0.1 0.08 0.03"
+      castshadow="false"/>
+
+    <!-- ── Ground plane (large dark concrete) ─────────────────── -->
+    <geom
+      name="floor"
+      type="plane"
+      size="12 12 0.1"
+      material="concrete_mat"
+      condim="3"/>
+
+    <!-- Subtle grid-line overlay via a very thin flat plane above floor -->
+    <!-- (optional visual layer — keep contype/conaffinity=0 so no physics) -->
+
+    <!-- ── Perimeter walls (arena feel) ───────────────────────── -->
+    <!-- South wall -->
+    <geom
+      name="wall_s"
+      type="box"
+      size="6.02 0.08 0.80"
+      pos="0 -6 0.80"
+      material="wall_mat"
+      condim="1"/>
+    <!-- North wall -->
+    <geom
+      name="wall_n"
+      type="box"
+      size="6.02 0.08 0.80"
+      pos="0  6 0.80"
+      material="wall_mat"
+      condim="1"/>
+    <!-- West wall -->
+    <geom
+      name="wall_w"
+      type="box"
+      size="0.08 6.02 0.80"
+      pos="-6 0 0.80"
+      material="wall_mat"
+      condim="1"/>
+    <!-- East wall -->
+    <geom
+      name="wall_e"
+      type="box"
+      size="0.08 6.02 0.80"
+      pos=" 6 0 0.80"
+      material="wall_mat"
+      condim="1"/>
+
+    <!-- Blue accent strip on top of each wall -->
+    <geom name="acc_s" type="box" size="6.02 0.09 0.025" pos="0 -6 1.625" material="accent_mat" contype="0" conaffinity="0"/>
+    <geom name="acc_n" type="box" size="6.02 0.09 0.025" pos="0  6 1.625" material="accent_mat" contype="0" conaffinity="0"/>
+    <geom name="acc_w" type="box" size="0.09 6.02 0.025" pos="-6 0 1.625" material="accent_mat" contype="0" conaffinity="0"/>
+    <geom name="acc_e" type="box" size="0.09 6.02 0.025" pos=" 6 0 1.625" material="accent_mat" contype="0" conaffinity="0"/>
+
+    <!-- ── Hover target marker (glowing ring on floor) ─────────── -->
+    <!-- Outer ring -->
+    <geom
+      name="target_ring_outer"
+      type="cylinder"
+      size="0.22 0.004"
+      pos="0.0 0.0 0.002"
+      material="target_mat"
+      contype="0" conaffinity="0"/>
+    <!-- Inner ring -->
+    <geom
+      name="target_ring_inner"
+      type="cylinder"
+      size="0.08 0.004"
+      pos="0.0 0.0 0.002"
+      material="target_mat"
+      contype="0" conaffinity="0"/>
+    <!-- Crosshair lines -->
+    <geom name="cross_ns" type="box" size="0.005 0.22 0.003" pos="0 0 0.003" material="target_mat" contype="0" conaffinity="0"/>
+    <geom name="cross_ew" type="box" size="0.22 0.005 0.003" pos="0 0 0.003" material="target_mat" contype="0" conaffinity="0"/>
+
+    <!-- ── Drone body ──────────────────────────────────────────── -->
+    <body name="cf2x" pos="0 0 0.1">
+      <freejoint name="root"/>
+
+      <!-- Tracking camera — slightly higher and further back for drama -->
+      <camera
+        name="track_cam"
+        mode="trackcom"
+        pos="0 -1.0 0.55"
+        xyaxes="1 0 0 0 0.45 1"/>
+
+      <!-- Fixed overview camera -->
+      <camera
+        name="overview_cam"
+        mode="fixed"
+        pos="2.2 -2.2 2.5"
+        xyaxes="-0.707 0.707 0 -0.354 -0.354 0.866"/>
+
+      <inertial
+        pos="0 0 0"
+        mass="0.027"
+        diaginertia="1.4e-5 1.4e-5 2.17e-5"/>
+
+      <!-- Main body (dark) -->
+      <geom
+        name="visual"
+        type="mesh"
+        mesh="cf2_mesh"
+        material="drone_mat"
+        contype="0" conaffinity="0"/>
+
+      <!-- Collision cylinder (invisible) -->
+      <geom
+        name="collision"
+        type="cylinder"
+        size="0.06 0.0125"
+        contype="1" conaffinity="1"
+        rgba="0 0 0 0"/>
+
+      <!-- Motor housings (orange spheres at arm tips) -->
+      <geom name="motor0" type="sphere" size="0.008" pos=" 0.028 -0.028 0.004" material="motor_mat" contype="0" conaffinity="0"/>
+      <geom name="motor1" type="sphere" size="0.008" pos="-0.028 -0.028 0.004" material="motor_mat" contype="0" conaffinity="0"/>
+      <geom name="motor2" type="sphere" size="0.008" pos="-0.028  0.028 0.004" material="motor_mat" contype="0" conaffinity="0"/>
+      <geom name="motor3" type="sphere" size="0.008" pos=" 0.028  0.028 0.004" material="motor_mat" contype="0" conaffinity="0"/>
+
+      <!-- Rotor discs (translucent) -->
+      <geom name="disc0" type="cylinder" size="0.023 0.001" pos=" 0.028 -0.028 0.006" material="rotor_disc_mat" contype="0" conaffinity="0"/>
+      <geom name="disc1" type="cylinder" size="0.023 0.001" pos="-0.028 -0.028 0.006" material="rotor_disc_mat" contype="0" conaffinity="0"/>
+      <geom name="disc2" type="cylinder" size="0.023 0.001" pos="-0.028  0.028 0.006" material="rotor_disc_mat" contype="0" conaffinity="0"/>
+      <geom name="disc3" type="cylinder" size="0.023 0.001" pos=" 0.028  0.028 0.006" material="rotor_disc_mat" contype="0" conaffinity="0"/>
+
+      <!-- Actuator sites -->
+      <site name="rotor0" pos=" 0.028 -0.028 0" size="0.001"/>
+      <site name="rotor1" pos="-0.028 -0.028 0" size="0.001"/>
+      <site name="rotor2" pos="-0.028  0.028 0" size="0.001"/>
+      <site name="rotor3" pos=" 0.028  0.028 0" size="0.001"/>
+
+    </body>
+
+  </worldbody>
+
+  <!-- ═══════════════════════════════════════════════════
+       Actuators (identical to basic_quadrotor.xml)
+  ═══════════════════════════════════════════════════ -->
+  <actuator>
+    <general name="rotor0" site="rotor0" gear="0 0 1 0 0 -0.02513"/>
+    <general name="rotor1" site="rotor1" gear="0 0 1 0 0  0.02513"/>
+    <general name="rotor2" site="rotor2" gear="0 0 1 0 0 -0.02513"/>
+    <general name="rotor3" site="rotor3" gear="0 0 1 0 0  0.02513"/>
+  </actuator>
+
+</mujoco>
