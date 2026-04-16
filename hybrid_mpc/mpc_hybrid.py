@@ -34,7 +34,7 @@ from physics import build_physics_fn, rk4_ca
 # ══════════════════════════════════════════════════════════════════════════════
 # Config
 # ══════════════════════════════════════════════════════════════════════════════
-XML_PATH = "../basic_quadrotor.xml"
+XML_PATH = "../basic_quadrotor_presentation.xml"
 DT_CTRL  = 0.02
 SIM_TIME = 8.0
 HORIZON  = 25    # can use a longer horizon than pure NN MPC — faster per step
