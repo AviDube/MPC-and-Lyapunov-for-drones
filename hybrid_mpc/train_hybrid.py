@@ -1,19 +1,5 @@
 """
-train_hybrid.py
-───────────────
-Trains a hybrid physics + NN dynamics model:
-
-    x_{k+1} = RK4(f_physics)(x_k, u_k) + f_theta(x_k, u_k)
-
-The physics term handles the dominant dynamics exactly (full rotation
-matrix, gyroscopic coupling, gravity). The NN learns only what's left:
-aerodynamic drag, rotor wake, motor lag, and other unmodelled effects.
-
-Key advantages over a pure NN:
-  - NN target is ~10-100x smaller (corrections not full state transitions)
-  - Correct behaviour guaranteed near hover even with limited data
-  - Extrapolates physically — the physics term is always sensible
-  - Needs far less data to reach the same accuracy
+Trains a hybrid dynamics model.
 
 Usage:
     python train_hybrid.py
@@ -31,9 +17,7 @@ import mujoco
 
 from hybrid_mpc.physics import rk4_np
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Load drone parameters from XML
-# ══════════════════════════════════════════════════════════════════════════════
+# load params
 XML_PATH = "../basic_quadrotor.xml"
 mj_model = mujoco.MjModel.from_xml_path(XML_PATH)
 
@@ -48,16 +32,14 @@ print(f"Drone: mass={MASS:.4f}kg  g={GRAV:.4f}  "
       f"I={[f'{v:.6f}' for v in INERTIA]}")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Residual NN — learns f_theta(x, u) → delta
-# ══════════════════════════════════════════════════════════════════════════════
+# residual NN
 class ResidualBlock(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.l1  = nn.Linear(dim, dim)
         self.l2  = nn.Linear(dim, dim)
-        self.act = nn.SiLU()   # SiLU (Swish) — smoother than ELU, good for
-                               # physics residuals which tend to be smooth
+        self.act = nn.SiLU()   # SiLU
+                               
 
     def forward(self, x):
         return x + self.l2(self.act(self.l1(x)))
@@ -65,19 +47,10 @@ class ResidualBlock(nn.Module):
 
 class HybridResidualNN(nn.Module):
     """
-    Small MLP that learns the physics residual f_theta(x, u) → delta.
+    Small MLP that learns the physics residual f_theta(x, u)
 
     Input  : (x, u) concatenated — 16 dims
     Output : delta = x_next_true - x_next_physics — 12 dims
-
-    Architecture choices:
-      - SiLU activation: smoother than ELU, empirically better for
-        aerodynamic residuals which have no discontinuities
-      - No LayerNorm: keeps CasADi export simple (just Linear + SiLU)
-      - Small hidden dim (64): residuals are small and smooth;
-        a large network would overfit the noise
-      - Last layer init near zero: residual starts at zero correction,
-        training only grows it where data demands it
     """
     def __init__(self, nx=12, nu=4, hidden=64, n_layers=3):
         super().__init__()
@@ -98,15 +71,9 @@ class HybridResidualNN(nn.Module):
         return self.net(xu)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Data preparation
-# ══════════════════════════════════════════════════════════════════════════════
 def compute_physics_residuals(X, U, X_next):
     """
     Compute delta = x_next_true - RK4_physics(x, u) for every transition.
-
-    This is what the NN learns to predict. If the physics model were perfect,
-    delta would be zero everywhere.
     """
     N = len(X)
     delta = np.zeros_like(X_next)
@@ -118,13 +85,9 @@ def compute_physics_residuals(X, U, X_next):
     return delta
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Training
-# ══════════════════════════════════════════════════════════════════════════════
 def train(args):
     os.makedirs("models", exist_ok=True)
 
-    # ── load transitions ───────────────────────────────────────────────────────
     d      = np.load(args.data)
     X      = d["X"].astype(np.float64)
     U      = d["U_wrench"].astype(np.float64)
@@ -132,7 +95,6 @@ def train(args):
     N      = len(X)
     print(f"Loaded {N} transitions from {args.data}")
 
-    # ── compute residuals (vectorised physics rollout) ─────────────────────────
     print("Computing physics residuals (RK4)...")
     delta = compute_physics_residuals(X, U, X_next)
 
@@ -151,7 +113,7 @@ def train(args):
           f"({100*res_mag/full_mag:.1f}% of full transition)")
     print("(Lower % = physics model is more accurate = easier learning task)")
 
-    # ── normalise inputs only; output (delta) is already small ─────────────────
+    # normalise inputs
     XU      = np.concatenate([X, U], axis=1).astype(np.float32)
     delta_f = delta.astype(np.float32)
 
@@ -168,7 +130,6 @@ def train(args):
              n_layers=np.array([args.n_layers]),
              nx=np.array([nx]), nu=np.array([nu]))
 
-    # ── dataset ───────────────────────────────────────────────────────────────
     dataset = TensorDataset(
         torch.from_numpy(XU_n),
         torch.from_numpy(delta_f),
@@ -182,7 +143,7 @@ def train(args):
                               shuffle=True, drop_last=True)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch)
 
-    # ── model ─────────────────────────────────────────────────────────────────
+    # model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     net    = HybridResidualNN(nx=nx, nu=nu,
                               hidden=args.hidden,
@@ -191,8 +152,6 @@ def train(args):
     sched  = torch.optim.lr_scheduler.CosineAnnealingLR(
                  opt, T_max=args.epochs, eta_min=1e-5)
     loss_fn = nn.HuberLoss(delta=0.01)
-    # HuberLoss instead of MSE: more robust to the occasional large residual
-    # from near-ground contacts or aggressive manoeuvres in training data
 
     n_params = sum(p.numel() for p in net.parameters())
     print(f"\nTraining HybridResidualNN on {device}  |  {n_params} params")
@@ -233,7 +192,7 @@ def train(args):
 
     print(f"\nBest val loss: {best_val:.4e}  →  models/hybrid_nn.pt")
 
-    # ── validation: per-dim RMSE in physical units ────────────────────────────
+    # val
     net.load_state_dict(torch.load("models/hybrid_nn.pt", map_location=device))
     net.eval()
     preds, trues = [], []
@@ -248,14 +207,13 @@ def train(args):
     for lbl, r in zip(labels, rmse):
         print(f"  {lbl:>6}: {r:.4e}")
 
-    # What fraction of residual error is unexplained by NN?
     baseline_rmse = np.sqrt((true**2).mean(axis=0))
     print("\nPhysics-only RMSE (NN not applied):")
     for lbl, b, r in zip(labels, baseline_rmse, rmse):
         pct = 100*r/b if b > 1e-10 else 0
         print(f"  {lbl:>6}: {b:.4e}  →  NN reduces to {r:.4e}  ({pct:.0f}% remaining)")
 
-    # ── plot ──────────────────────────────────────────────────────────────────
+    # plot
     plt.figure(figsize=(8, 3))
     plt.plot(train_losses, label="train"); plt.plot(val_losses, label="val")
     plt.yscale("log"); plt.xlabel("Epoch"); plt.ylabel("Huber loss")

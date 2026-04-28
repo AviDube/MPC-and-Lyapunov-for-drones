@@ -1,32 +1,11 @@
 """
-physics.py
-──────────
-Exact nonlinear quadrotor physics model with RK4 integration.
-
-This is the 'known' part of the hybrid model. It implements:
-  - Full rotation matrix (no small-angle approximation)
-  - Exact Euler angle kinematics (W matrix)
-  - Gyroscopic coupling: omega x I omega
-  - Gravity in world frame
-  - Thrust mapped through full rotation matrix
-
-Both numpy (for training) and CasADi (for MPC) implementations
-are provided — they are mathematically identical.
-
-State vector x = [px, py, pz, phi, theta, psi, vx, vy, vz, p, q, r]
-Control u     = [T, tau_x, tau_y, tau_z]   (total thrust + body torques)
+Physics model of a quadrotor drone.
 """
 
 import numpy as np
 import casadi as ca
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Numpy implementation (used during training data generation + loss computation)
-# ══════════════════════════════════════════════════════════════════════════════
-
 def rotation_matrix_np(phi, theta, psi):
-    """ZYX rotation matrix R: body → world."""
     cp, sp = np.cos(phi),   np.sin(phi)
     ct, st = np.cos(theta), np.sin(theta)
     cy, sy = np.cos(psi),   np.sin(psi)
@@ -38,11 +17,6 @@ def rotation_matrix_np(phi, theta, psi):
 
 
 def euler_kinematics_np(phi, theta):
-    """
-    W matrix: eta_dot = W(eta) @ omega
-    Maps body angular rates (p,q,r) to Euler angle rates (phi_dot, theta_dot, psi_dot).
-    Singular at theta = ±pi/2 but fine for typical drone flight.
-    """
     cp, sp = np.cos(phi),   np.sin(phi)
     ct, tt = np.cos(theta), np.tan(theta)
     return np.array([
@@ -53,21 +27,6 @@ def euler_kinematics_np(phi, theta):
 
 
 def ode_np(x, u, mass, inertia, grav):
-    """
-    Continuous-time quadrotor ODE: xdot = f_physics(x, u)
-
-    Parameters
-    ----------
-    x       : (12,) state vector
-    u       : (4,)  control [T, tau_x, tau_y, tau_z]
-    mass    : float
-    inertia : (3,)  [Ix, Iy, Iz]
-    grav    : float
-
-    Returns
-    -------
-    xdot : (12,)
-    """
     px,py,pz      = x[0],  x[1],  x[2]
     phi,theta,psi = x[3],  x[4],  x[5]
     vx,vy,vz      = x[6],  x[7],  x[8]
@@ -86,7 +45,7 @@ def ode_np(x, u, mass, inertia, grav):
     W       = euler_kinematics_np(phi, theta)
     eta_dot = W @ np.array([p, q, r])
 
-    # Angular rate dynamics (Euler equations): I*omega_dot = tau - omega x I*omega
+    # Angular rate dynamics: I*omega_dot = tau - omega x I*omega
     omega   = np.array([p, q, r])
     I_omega = np.array([Ix*p, Iy*q, Iz*r])
     gyro    = np.cross(omega, I_omega)           # omega x I*omega (gyroscopic)
@@ -101,7 +60,6 @@ def ode_np(x, u, mass, inertia, grav):
 def rk4_np(x, u, dt, mass, inertia, grav):
     """
     RK4 integration of the physics ODE over one timestep dt.
-    4th-order accurate — much better than Euler for the same dt.
     """
     k1 = ode_np(x,            u, mass, inertia, grav)
     k2 = ode_np(x + dt/2*k1,  u, mass, inertia, grav)
@@ -110,10 +68,7 @@ def rk4_np(x, u, dt, mass, inertia, grav):
     return x + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CasADi implementation (used inside the MPC NLP)
-# ══════════════════════════════════════════════════════════════════════════════
-
+# CasADi implementation for easier differentiation during MPC
 def rotation_matrix_ca(phi, theta, psi):
     """ZYX rotation matrix in CasADi MX."""
     cp, sp = ca.cos(phi),   ca.sin(phi)
@@ -180,7 +135,6 @@ def build_physics_fn(mass, inertia, grav, dt,
                      name="f_physics"):
     """
     Build a CasADi Function for the physics step.
-    f_physics(x, u) → x_next_physics
     """
     x_sym = ca.MX.sym("x", 12)
     u_sym = ca.MX.sym("u", 4)

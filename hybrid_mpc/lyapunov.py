@@ -1,39 +1,5 @@
 """
-certify_nmpc.py
-───────────────
-Post-hoc stability certification of the Hybrid NMPC controller using
-Generalized Lyapunov Functions (Long, Cortés, Atanasov — NeurIPS 2025).
-
-Pipeline
-────────
-  1. Sample initial error states around hover
-  2. Collect M-step closed-loop rollouts via NMPC + hybrid dynamics
-     (warm-start preserved within each rollout for speed)
-  3. Train  φ(e; θ₁)  — neural residual on top of quadratic base J^π
-            σ(e; θ₂)  — step-weight network
-  4. Evaluate generalised decrease condition on large test set
-  5. Run automated go/no-go checks
-  6. Visualise certificate over 2-D state slices
-
-Usage
-─────
-  python certify_nmpc.py              # full run
-  python certify_nmpc.py --fast       # smoke-test (~10 min)
-  python certify_nmpc.py --skip-rollouts  # reuse cached .npy, retrain only
-  python certify_nmpc.py --expand     # larger domain (after achieving 100%)
-
-Changes vs v1
-─────────────
-  • M = 30 (full) / 15 (fast)  — was 20/10; covers full settling transient
-  • Tighter default DOMAIN_HALF — achieve 100% here, then use --expand
-  • N_EPOCHS = 800 (full) / 150 (fast) — loss had not plateaued in v1
-  • Single HybridMPC instance per rollout — warm-start preserved → ~3× faster
-  • Cache keyed by (M, domain) — auto-invalidates when params change
-  • Automated go/no-go checks with actionable failure messages
-  • MuJoCo trajectory loader as fast alternative to live NMPC rollouts
-
-Dependencies: numpy, torch, casadi, matplotlib
-(same environment as mpc_hybrid.py — no new installs needed)
+Generalised Lyapunov certificate for the quadrotor NMPC.
 """
 
 import argparse
@@ -47,15 +13,13 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
-# ── import your existing MPC machinery ────────────────────────────────────────
 from mpc_hybrid import (
     f_hybrid, HybridMPC,
     MASS, GRAV, DT_CTRL, nx, nu,
 )
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 0.  Configuration
-# ══════════════════════════════════════════════════════════════════════════════
+
+# Config
 parser = argparse.ArgumentParser()
 parser.add_argument("--fast",           action="store_true",
                     help="Smoke-test with tiny dataset (~10 min)")
@@ -65,11 +29,10 @@ parser.add_argument("--expand",         action="store_true",
                     help="Use larger domain (run after achieving 100% on default)")
 args, _ = parser.parse_known_args()
 
-# ── Hover reference ───────────────────────────────────────────────────────────
+# Hover reference
 X_REF = np.array([0.5, -0.5, 1.0,  0., 0., 0.,  0., 0., 0.,  0., 0., 0.])
 
-# ── Certification domain ──────────────────────────────────────────────────────
-# Strategy: start tight → achieve 100% → run --expand to grow the domain.
+# Certification domain
 # State order: [x, y, z,  roll, pitch, yaw,  vx, vy, vz,  wx, wy, wz]
 
 if args.expand:
@@ -89,37 +52,35 @@ else:
         1.00, 1.00, 1.00,       # ±1 rad/s
     ])
 
-# State normalisation — divide error by these before feeding NNs
+# State normalisation
 STATE_SCALE = DOMAIN_HALF.copy()
 
-# ── Rollout horizon ───────────────────────────────────────────────────────────
-# M=30 → 0.6s lookahead.  Attitude settles ~0.3s, position ~0.5–1s.
-# If weight concentration is still front-loaded after training, increase to 40.
+# Rollout horizon
 M = 30 if not args.fast else 15
 
-# Small exclusion ball — MPC settles to neighbourhood, not exactly 0
+# settling ball radius
 DELTA = 0.02
 
-# ── Training ──────────────────────────────────────────────────────────────────
+# Training
 N_TRAIN   = 5_000  if not args.fast else  300
 N_TEST    = 30_000 if not args.fast else 1_500
 BATCH     = 256
 N_EPOCHS  = 800    if not args.fast else  150
 LR        = 3e-4
-ALPHA_BAR = 0.02   # mild per-step decay — intentionally loose
-BETA      = 0.01   # positivity regulariser weight on ‖e‖²
+ALPHA_BAR = 0.02  
+BETA      = 0.01  
 
 OUT_DIR = Path("certificate_outputs")
 OUT_DIR.mkdir(exist_ok=True)
 
 DEVICE = torch.device("cpu")
 
-# ── Qf: terminal cost matrix from your NLP  (Qf = 10 × Q) ───────────────────
+# Qf
 QF_DIAG = np.array([200., 200., 1000., 50., 50., 500.,
                       20.,  20.,   50., 10., 10.,  100.])
 QF = torch.tensor(np.diag(QF_DIAG), dtype=torch.float32)
 
-# ── Cache key — invalidates automatically when M or domain changes ────────────
+# caches for rollout since they take so long
 _cache_key = hashlib.md5(
     np.concatenate([[M], DOMAIN_HALF]).tobytes()
 ).hexdigest()[:8]
@@ -127,17 +88,9 @@ TRAIN_CACHE = OUT_DIR / f"trajs_train_{_cache_key}.npy"
 TEST_CACHE  = OUT_DIR / f"trajs_test_{_cache_key}.npy"
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 1.  Networks
-# ══════════════════════════════════════════════════════════════════════════════
 class ResidualNet(nn.Module):
     """
-    φ(e; θ₁) : R^12 → R
-
-    Neural correction on top of the quadratic base J^π = e^T Qf e.
-    Tanh activations ensure global smoothness (Lipschitz everywhere),
-    required for Theorem 4.2 of the paper.
-    Initialised small so the quadratic base dominates early in training.
+    Residual Net from the paper
     """
     def __init__(self, ne: int = 12, hidden: int = 128, depth: int = 3):
         super().__init__()
@@ -157,10 +110,7 @@ class ResidualNet(nn.Module):
 
 class WeightNet(nn.Module):
     """
-    σ(e; θ₂) : R^12 → R^M_≥0   with  Σᵢ σᵢ = M  (softmax × M)
-
-    Learns where in the horizon to concentrate the decrease requirement.
-    Healthy certificates back-load weight (>30% in the last quintile).
+    Weight allocation net from the paper
     """
     def __init__(self, ne: int = 12, M: int = 30, hidden: int = 64):
         super().__init__()
@@ -175,7 +125,7 @@ class WeightNet(nn.Module):
         return torch.softmax(self.net(e_norm), dim=-1) * self.M   # (B, M)
 
 
-# Origin tensor — used to shift φ so V(0) = 0
+# Origin tensor
 _ORIGIN_NORM = torch.zeros(1, nx, device=DEVICE)
 
 
@@ -183,16 +133,7 @@ def compute_V(e_batch: torch.Tensor,
               phi_net:  ResidualNet,
               beta:     float = BETA) -> torch.Tensor:
     """
-    V(e) = e^T Qf e                 ← quadratic base (your MPC terminal cost)
-           + |φ(ê) − φ(0)|          ← neural residual, shifted so V(0) = 0
-           + β ‖e‖²                 ← strict positivity near origin
-
-    All terms ≥ 0.  V(e) = 0  iff  e = 0.
-
-    Args:
-        e_batch : (B, 12)  raw error states
-    Returns:
-        V       : (B,)
+    Computes V as defined in the paper
     """
     e_norm = e_batch / torch.tensor(STATE_SCALE, dtype=torch.float32)
 
@@ -217,14 +158,7 @@ def generalised_decrease(
         alpha_bar:  float = ALPHA_BAR,
 ) -> torch.Tensor:
     """
-    F(e_k) = (1/M) Σᵢ σᵢ(e_k)·V(eᵢ)  −  (1−ᾱ)·V(e_k)
-
-    Certificate valid where F(e_k) ≤ 0  (paper eq. 14).
-
-    Args:
-        traj_batch : (B, M+1, 12)
-    Returns:
-        F          : (B,)
+    F function from the paper
     """
     M_steps = traj_batch.shape[1] - 1
 
@@ -243,24 +177,12 @@ def generalised_decrease(
     return weighted_avg - (1.0 - alpha_bar) * V0
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 2.  Rollout collection
-# ══════════════════════════════════════════════════════════════════════════════
+# Rollout collection
 def rollout_one(e0: np.ndarray, x_ref: np.ndarray, M: int) -> np.ndarray:
     """
     Simulate M closed-loop steps from error state e0.
-
-    FIX vs v1: a single HybridMPC instance is used for the whole rollout so
-    IPOPT warm-starts carry over between steps.  Only the first solve from a
-    cold start is slow (~1–1.5s); subsequent steps warm-start (~50ms).
-    Total per rollout: ~1.5 + (M-1)×0.05s  ≈  3s for M=30.
-
-    Dynamics propagated via f_hybrid (CasADi) — same model the MPC uses.
-
-    Returns:
-        traj : (M+1, 12)  error states  float32
     """
-    mpc  = HybridMPC()   # one instance → warm-start preserved across steps
+    mpc  = HybridMPC()   
     traj = np.empty((M + 1, nx), dtype=np.float32)
     x    = x_ref + e0
     traj[0] = e0.astype(np.float32)
@@ -275,7 +197,7 @@ def rollout_one(e0: np.ndarray, x_ref: np.ndarray, M: int) -> np.ndarray:
 
 
 def sample_error_states(N: int, rng: np.random.Generator) -> np.ndarray:
-    """Uniform samples in domain, excluding δ-ball around origin."""
+    """Uniform samples in domain"""
     out: list[np.ndarray] = []
     while sum(len(a) for a in out) < N:
         e    = rng.uniform(-DOMAIN_HALF, DOMAIN_HALF, size=(N * 2, nx))
@@ -315,14 +237,7 @@ def collect_rollouts(N: int, M: int, x_ref: np.ndarray,
 
 def load_mujoco_trajs(npy_path: str, M: int) -> np.ndarray:
     """
-    Fast alternative: load pre-recorded MuJoCo state trajectories.
-
-    Run mpc_hybrid.py with many random starting positions, save `states`
-    (shape: N_traj × T_steps × 12, absolute states), then point here.
-    Converts absolute → error states and truncates/pads to M+1 steps.
-
-    Usage:
-        trajs_train = load_mujoco_trajs("mujoco_trajs.npy", M)
+    Load pre-recorded MuJoCo state trajectories.
     """
     raw = np.load(npy_path).astype(np.float32)    # (N, T, 12)
     N, T, _ = raw.shape
@@ -333,9 +248,7 @@ def load_mujoco_trajs(npy_path: str, M: int) -> np.ndarray:
     return trajs
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 3.  Training
-# ══════════════════════════════════════════════════════════════════════════════
+# Training
 def train(trajs:      np.ndarray,
           phi_net:    ResidualNet,
           sigma_net:  WeightNet,
@@ -394,9 +307,8 @@ def train(trajs:      np.ndarray,
     return history
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 4.  Evaluation
-# ══════════════════════════════════════════════════════════════════════════════
+
+# Evaluation
 @torch.no_grad()
 def evaluate(trajs_test: np.ndarray,
              phi_net:    ResidualNet,
@@ -439,9 +351,7 @@ def weight_concentration(trajs_test: np.ndarray,
     return (w / w.sum(dim=1, keepdim=True)).mean(dim=0).numpy()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 5.  Go / no-go checks
-# ══════════════════════════════════════════════════════════════════════════════
+# Checks for certificate validity that were used in the paper. Too harsh for our problem.
 @torch.no_grad()
 def run_checks(phi_net:   ResidualNet,
                sigma_net: WeightNet,
@@ -488,7 +398,7 @@ def run_checks(phi_net:   ResidualNet,
         "Increase M or reduce DOMAIN_HALF to shrink the problem",
     )
 
-    # 4. V(0) ≈ 0
+    # 4. V(0) = 0
     V0_val = compute_V(torch.zeros(1, nx), phi_net).item()
     check(
         f"V(0) ≈ 0  (got {V0_val:.6f}, want < 1e-3)",
@@ -530,9 +440,8 @@ def run_checks(phi_net:   ResidualNet,
     return all_pass
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 6.  Visualisation
-# ══════════════════════════════════════════════════════════════════════════════
+
+# Visualisation
 @torch.no_grad()
 def plot_certificate(phi_net:    ResidualNet,
                      sigma_net:  WeightNet,
@@ -551,14 +460,14 @@ def plot_certificate(phi_net:    ResidualNet,
     )
     gs = gridspec.GridSpec(3, 4, figure=fig, hspace=0.45, wspace=0.35)
 
-    # (A) Training loss
+    # Training loss
     ax = fig.add_subplot(gs[0, 0])
     ax.semilogy(history, color="#2563EB", lw=1.5)
     ax.set_title("Training loss")
     ax.set_xlabel("Epoch"); ax.set_ylabel("Mean ReLU(F)")
     ax.grid(True, alpha=0.3)
 
-    # (B) Step-weight concentration
+    # Step-weight concentration
     ax = fig.add_subplot(gs[0, 1])
     ax.bar(np.arange(1, len(w_conc) + 1), w_conc,
            color="#7C3AED", alpha=0.8, width=0.85)
@@ -566,7 +475,7 @@ def plot_certificate(phi_net:    ResidualNet,
     ax.set_xlabel("Horizon step i"); ax.set_ylabel("Mean normalised weight")
     ax.grid(True, alpha=0.3, axis="y")
 
-    # (C) F distribution
+    # F distribution
     ax = fig.add_subplot(gs[0, 2])
     F_all = eval_res["F_all"]
     ax.hist(F_all, bins=80, color="#059669", alpha=0.8, density=True)
@@ -574,7 +483,7 @@ def plot_certificate(phi_net:    ResidualNet,
     ax.set_title(f"F(e) distribution\n{eval_res['pct_ok']:.2f}% satisfy F≤0")
     ax.set_xlabel("F(e)"); ax.legend(); ax.grid(True, alpha=0.3)
 
-    # (D) V along sample trajectories
+    # V along sample trajectories
     ax = fig.add_subplot(gs[0, 3])
     rng = np.random.default_rng(42)
     for i in rng.choice(len(trajs_test), size=10, replace=False):
@@ -598,7 +507,7 @@ def plot_certificate(phi_net:    ResidualNet,
     ]
     N_GRID = 60
 
-    # (E–H) V slices
+    # V slices
     for col, (title, i1, i2, lim1, lim2, xl, yl) in enumerate(SLICES):
         ax = fig.add_subplot(gs[1, col])
         g1 = np.linspace(-lim1, lim1, N_GRID)
@@ -616,7 +525,7 @@ def plot_certificate(phi_net:    ResidualNet,
         ax.set_title(f"V(e)  [{title}]", fontsize=9)
         ax.set_xlabel(xl, fontsize=8); ax.set_ylabel(yl, fontsize=8)
 
-    # (I–L) F scatter on test set (green = OK, red = violation)
+    # F scatter on test set (green = OK, red = violation)
     F_vals = eval_res["F_all"]
     e0s    = trajs_test[:, 0, :]
     vmin   = float(np.percentile(F_vals, 2))
@@ -639,9 +548,7 @@ def plot_certificate(phi_net:    ResidualNet,
     plt.show()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# 7.  Main
-# ══════════════════════════════════════════════════════════════════════════════
+# main
 def main() -> None:
     print("=" * 60)
     print("  Generalised Lyapunov Certificate — Quadrotor NMPC  v2")
@@ -658,7 +565,7 @@ def main() -> None:
         print("  *** EXPAND MODE — using larger domain ***")
     print()
 
-    # 1. Collect / load rollouts ───────────────────────────────────────────────
+    # Collect / load rollouts
     use_cache = (TRAIN_CACHE.exists() and TEST_CACHE.exists()
                  and (args.skip_rollouts or not args.fast))
 
@@ -676,18 +583,18 @@ def main() -> None:
             np.save(TEST_CACHE,  trajs_test)
             print(f"Cached → {TRAIN_CACHE.name}  /  {TEST_CACHE.name}\n")
 
-    # 2. Build networks ────────────────────────────────────────────────────────
+    # Build networks
     phi_net   = ResidualNet(ne=nx, hidden=128, depth=3).to(DEVICE)
     sigma_net = WeightNet(ne=nx, M=M, hidden=64).to(DEVICE)
     n_phi     = sum(p.numel() for p in phi_net.parameters())
     n_sig     = sum(p.numel() for p in sigma_net.parameters())
     print(f"Parameters: φ={n_phi:,}  σ={n_sig:,}  total={n_phi+n_sig:,}\n")
 
-    # 3. Train ─────────────────────────────────────────────────────────────────
+    # Train
     history = train(trajs_train, phi_net, sigma_net,
                     n_epochs=N_EPOCHS, batch_size=BATCH, lr=LR)
 
-    # 4. Evaluate ──────────────────────────────────────────────────────────────
+    # Evaluate
     eval_res = evaluate(trajs_test, phi_net, sigma_net)
     w_conc   = weight_concentration(trajs_test, sigma_net)
 
@@ -701,10 +608,10 @@ def main() -> None:
         print(f"  {lbl} : {b.sum():.3f}  {bar}")
     print()
 
-    # 5. Go / no-go ────────────────────────────────────────────────────────────
+    # Checks
     all_pass = run_checks(phi_net, sigma_net, eval_res, w_conc)
 
-    # 6. Save checkpoint ───────────────────────────────────────────────────────
+    # Save checkpoint
     ckpt = OUT_DIR / "certificate.pt"
     torch.save({
         "phi_state":     phi_net.state_dict(),
@@ -723,7 +630,7 @@ def main() -> None:
     }, ckpt)
     print(f"Checkpoint saved → {ckpt}\n")
 
-    # 7. Visualise ─────────────────────────────────────────────────────────────
+    # Visualise
     plot_certificate(phi_net, sigma_net, trajs_test,
                      history, eval_res, w_conc)
 

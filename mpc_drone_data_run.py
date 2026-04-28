@@ -1,19 +1,5 @@
 """
-collect_data.py
-───────────────
-Runs the existing MPC controller and logs (x_t, u_t, x_{t+1}) transition
-tuples to disk for residual dynamics training.
-
-Usage:
-    python collect_data.py                          # saves to data/transitions.npz
-    python collect_data.py --out data/run2.npz      # custom path
-    python collect_data.py --episodes 5             # multiple random start episodes
-
-Output .npz keys:
-    X      : (N, 12) states at time t
-    U      : (N,  4) rotor commands at time t   [ctrl space, not wrench]
-    X_next : (N, 12) states at time t+1
-    U_wrench: (N, 4) wrench [T, tx, ty, tz] for reconstruction
+This script collects MPC-generated transition data for a quadrotor in MuJoCo.
 """
 
 import argparse
@@ -23,7 +9,6 @@ import mujoco
 import mujoco.viewer
 from scipy.spatial.transform import Rotation
 
-# ── paste / import your existing helpers ──────────────────────────────────────
 XML_PATH  = "basic_quadrotor.xml"
 DT_CTRL   = 0.02
 SIM_TIME  = 8.0
@@ -58,7 +43,7 @@ def wrench_to_rotors(u):
     u3 = T/4 + tx/(4*l) - ty/(4*l) + tz/(4*k)
     return np.array([u0, u1, u2, u3])
 
-# ── linearized model (same as original) ───────────────────────────────────────
+# linearized model
 nx, nu = 12, 4
 
 A = np.zeros((nx, nx))
@@ -71,12 +56,10 @@ B[8,0]=1/m; B[9,1]=1/Ix; B[10,2]=1/Iy; B[11,3]=1/Iz
 Ad = np.eye(nx) + A * DT_CTRL
 Bd = B * DT_CTRL
 
-# ── import your MPC class (or paste it here) ──────────────────────────────────
-# We import from your main file; adjust the module name if needed.
+
 try:
-    from linear_mpc.mpc_demo import MPC   # if you split it out
+    from linear_mpc.mpc_demo import MPC 
 except ImportError:
-    # Inline fallback — paste your MPC class here if not importable
     import cvxpy as cp
 
     class MPC:
@@ -134,7 +117,7 @@ except ImportError:
             return u[:,0].value
 
 
-# ── collection loop ────────────────────────────────────────────────────────────
+# collection loop 
 def collect_episode(x_ref, render=False):
     """Run one episode, return (X, U_wrench, X_next) arrays."""
     mujoco.mj_resetData(model, data)
@@ -182,7 +165,7 @@ def main():
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 
-    # Reference hover targets (vary across episodes for data diversity)
+    # Reference hover targets
     refs = [
         np.array([0.5, -0.5, 1.0, 0, 0, 0.0, 0,0,0, 0,0,0]),
         np.array([0.0,  0.0, 1.5, 0, 0, 0.3, 0,0,0, 0,0,0]),

@@ -1,30 +1,5 @@
 """
-train_lyapunov.py
-─────────────────
-Run from hybrid_mpc/:
-    cd hybrid_mpc
-    python train_lyapunov.py
-
-Trains V_psi certifying that x* = X_REF is a stable equilibrium of:
-    x_{k+1} = f_phys(x, pi_phi(x)) + f_theta(x, pi_phi(x))
-
-Two equilibrium corrections enforced:
-  1. pi_phi(0) = u*   — guaranteed by NeuralPolicy architecture
-  2. f_cl(x*) = x*    — enforced by subtracting delta* = f_theta(x*, u*)
-                         from every dynamics evaluation
-
-Training uses a counterexample-guided loop:
-  Repeat:
-    1. Sample states in region D
-    2. Minimise hinge loss on positive-definiteness + decrease conditions
-    3. Find violated states (counterexamples)
-    4. Add counterexamples to training set with repetition
-    5. Report violation rate
-
-Outputs:
-    models/lyapunov_net.pt
-    models/lyapunov_config.npz
-    models/lyapunov_training.png
+Trains a Lyapunov network V(e) for the closed-loop system with the learned policy.
 """
 
 import os
@@ -52,9 +27,7 @@ U_STAR = np.array([MASS*GRAV, 0.0, 0.0, 0.0], dtype=np.float32)
 os.makedirs("models", exist_ok=True)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Model definitions (must match distil_policy.py and train_hybrid.py exactly)
-# ══════════════════════════════════════════════════════════════════════════════
+# model definitions
 class NeuralPolicy(nn.Module):
     def __init__(self, nx=12, hidden=128, n_layers=3):
         super().__init__()
@@ -83,11 +56,7 @@ class HybridResidualNN(nn.Module):
 
 class LyapunovNet(nn.Module):
     """
-    V(e) = ||W * phi(e)||^2
-
-    phi has no bias in final layer  =>  phi(0) = 0  =>  V(0) = 0 exactly.
-    W is a learnable square matrix making the form more expressive than
-    a plain ||phi(e)||^2.
+    Simple NN
     """
     def __init__(self, nx=12, hidden=128, feat_dim=64):
         super().__init__()
@@ -104,9 +73,6 @@ class LyapunovNet(nn.Module):
         return (Wf**2).sum(dim=1, keepdim=True)   # (B,1), >=0, =0 at e=0
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Differentiable physics step (PyTorch, batched)
-# ══════════════════════════════════════════════════════════════════════════════
 def _R(phi, theta, psi):
     cp=torch.cos(phi); sp=torch.sin(phi)
     ct=torch.cos(theta); st=torch.sin(theta)
@@ -150,9 +116,6 @@ def physics_step(x_abs, u, dt=DT_CTRL):
     return x_abs+(dt/6)*(k1+2*k2+2*k3+k4)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Equilibrium-corrected closed-loop step
-# ══════════════════════════════════════════════════════════════════════════════
 def make_cl_step(policy, nn_res, xu_mean, xu_std,
                  x_ref_t, e_scale_t, delta_eq, device):
     """
@@ -189,9 +152,6 @@ def compute_delta_eq(nn_res, xu_mean, xu_std, device):
     return delta_star
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Lyapunov loss
-# ══════════════════════════════════════════════════════════════════════════════
 def lyapunov_loss(V, e, e_next, alpha, eps_pd, lam):
     Ve   = V(e).squeeze()
     Ven  = V(e_next).squeeze()
@@ -216,9 +176,6 @@ def lyapunov_loss(V, e, e_next, alpha, eps_pd, lam):
     }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Counterexample search
-# ══════════════════════════════════════════════════════════════════════════════
 @torch.no_grad()
 def find_violations(V, cl_step, alpha, n=100_000, device="cpu"):
     e    = (torch.rand(n, nx, device=device)*2 - 1)
@@ -232,16 +189,14 @@ def find_violations(V, cl_step, alpha, n=100_000, device="cpu"):
     return e[viol].detach(), n_v / n, n_v
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Training loop
-# ══════════════════════════════════════════════════════════════════════════════
 def train(alpha=0.05, eps_pd=0.01, lam=10.0,
           iters=30, inner_steps=200, batch=1024,
           n_init=50_000, n_verify=100_000, lr=1e-3):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ── load policy ────────────────────────────────────────────────────────────
+    # load policy
     cfg     = np.load("models/policy_config.npz")
     e_scale = torch.from_numpy(cfg["e_scale"]).float().to(device)
     policy  = NeuralPolicy().to(device)
@@ -255,7 +210,7 @@ def train(alpha=0.05, eps_pd=0.01, lam=10.0,
     print(f"Policy equilibrium error: {eq_err:.2e}  "
           f"[{'PASS' if eq_err<1e-5 else 'WARNING'}]")
 
-    # ── load hybrid NN residual ────────────────────────────────────────────────
+    # load hybrid NN residual
     cfg2    = np.load("models/hybrid_config.npz")
     nn_res  = HybridResidualNN(hidden=int(cfg2["hidden"][0]),
                                 n_layers=int(cfg2["n_layers"][0])).to(device)
@@ -265,7 +220,7 @@ def train(alpha=0.05, eps_pd=0.01, lam=10.0,
     xu_mean = torch.from_numpy(cfg2["xu_mean"].astype(np.float32)).to(device)
     xu_std  = torch.from_numpy(cfg2["xu_std"].astype(np.float32)).to(device)
 
-    # ── equilibrium correction ─────────────────────────────────────────────────
+    # equilibrium correction
     print("\nComputing equilibrium correction delta*:")
     x_ref_t  = torch.from_numpy(X_REF).float().to(device).unsqueeze(0)
     delta_eq = compute_delta_eq(nn_res, xu_mean, xu_std, device)
@@ -278,7 +233,7 @@ def train(alpha=0.05, eps_pd=0.01, lam=10.0,
     print(f"||f_cl(x*) - x*|| = {e0_nxt.norm().item():.2e}  "
           f"[{'PASS' if e0_nxt.norm().item()<1e-4 else 'FAIL'}]")
 
-    # ── Lyapunov network ───────────────────────────────────────────────────────
+    # Lyapunov network
     V_net = LyapunovNet(nx=nx, hidden=128, feat_dim=64).to(device)
     opt   = torch.optim.Adam(V_net.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.StepLR(opt, step_size=40, gamma=0.5)
@@ -297,14 +252,12 @@ def train(alpha=0.05, eps_pd=0.01, lam=10.0,
 
     for outer in range(1, iters+1):
 
-        # ── inner loop ─────────────────────────────────────────────────────
         V_net.train()
         for _ in range(inner_steps):
             idx   = torch.randperm(len(train_set))[:batch]
             e     = train_set[idx]
             e_nxt = cl_step(e)
 
-            # Always include the equilibrium to anchor V(0)=0
             e_zero    = torch.zeros(16, nx, device=device)
             e_zero_nxt= cl_step(e_zero)
 
@@ -320,7 +273,6 @@ def train(alpha=0.05, eps_pd=0.01, lam=10.0,
 
         sched.step()
 
-        # ── counterexample search ──────────────────────────────────────────
         V_net.eval()
         ces, ce_rate, n_viol = find_violations(
             V_net, cl_step, alpha, n=n_verify, device=device)
@@ -357,7 +309,7 @@ def train(alpha=0.05, eps_pd=0.01, lam=10.0,
             print(f"\nCertificate achieved at iter {outer} (<0.1% violations)")
             break
 
-    # ── final check ────────────────────────────────────────────────────────────
+    # final check
     print("\n── Final certificate check (500k samples) ──")
     V_net.load_state_dict(torch.load("models/lyapunov_net.pt",
                                      map_location=device))
@@ -368,7 +320,6 @@ def train(alpha=0.05, eps_pd=0.01, lam=10.0,
     print("Certificate VALID" if final_rate < 0.01
           else "Certificate PARTIAL — try more iters or smaller alpha")
 
-    # ── plot ───────────────────────────────────────────────────────────────────
     fig, axes = plt.subplots(1,3,figsize=(13,3))
     axes[0].plot(losses);     axes[0].set_yscale("log")
     axes[0].set_title("Total loss"); axes[0].grid()

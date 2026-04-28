@@ -1,4 +1,6 @@
-import os
+"""
+Basic drone environment using MuJoCo.
+"""
 os.environ["MUJOCO_GL"] = "egl"
 
 import mujoco
@@ -10,7 +12,7 @@ XML_PATH = "basic_quadrotor.xml"
 model = mujoco.MjModel.from_xml_path(XML_PATH)
 data  = mujoco.MjData(model)
 
-DT_SIM       = model.opt.timestep        # 0.002s from your XML
+DT_SIM       = model.opt.timestep        # 0.002s from XML
 DT_CTRL      = 0.02
 STEPS_PER_CTRL = int(DT_CTRL / DT_SIM)  # 10
 

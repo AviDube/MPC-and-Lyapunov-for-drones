@@ -1,3 +1,7 @@
+""""
+Linear MPC demo on MuJoCo
+"""
+
 import mujoco
 import mujoco.viewer
 import numpy as np
@@ -5,16 +9,11 @@ import cvxpy as cp
 import matplotlib.pyplot as plt
 from scipy.spatial.transform import Rotation
 
-# ==============================
 # Config
-# ==============================
 XML_PATH = "../basic_quadrotor.xml"
 DT_CTRL = 0.02
 SIM_TIME = 8.0
 
-# ==============================
-# Load model
-# ==============================
 model = mujoco.MjModel.from_xml_path(XML_PATH)
 data  = mujoco.MjData(model)
 
@@ -24,9 +23,6 @@ Ix, Iy, Iz = model.body_inertia[1]
 
 HOVER = (m * g) / 4
 
-# ==============================
-# State extraction
-# ==============================
 def quat_to_euler(q):
     w, x, y, z = q
     r = Rotation.from_quat([x, y, z, w])
@@ -40,9 +36,7 @@ def get_state(data):
     omega = data.qvel[3:6]
     return np.concatenate([pos, euler, vel, omega])
 
-# ==============================
-# Linearized model (hover)
-# ==============================
+# linearized model
 nx = 12
 nu = 4  # [T, tau_x, tau_y, tau_z]
 
@@ -55,14 +49,13 @@ A[1,7] = 1
 A[2,8] = 1
 
 # small-angle coupling
-A[6,4] = g      # vx_dot ≈ g * pitch
-A[7,3] = -g     # vy_dot ≈ -g * roll
+A[6,4] = g     
+A[7,3] = -g 
 
 # angular kinematics
 A[3,9]  = 1
 A[4,10] = 1
 A[5,11] = 1
-# NOTE: no artificial yaw damping — it doesn't exist in the real model
 
 # control effects
 B[8,0]  = 1/m
@@ -74,14 +67,6 @@ B[11,3] = 1/Iz
 Ad = np.eye(nx) + A * DT_CTRL
 Bd = B * DT_CTRL
 
-# ==============================
-# Wrench -> Rotor mapping
-# ==============================
-# Rotor positions from XML sites:
-#   rotor0: (+0.028, -0.028)  gear yaw = -0.02513
-#   rotor1: (-0.028, -0.028)  gear yaw = +0.02513
-#   rotor2: (-0.028, +0.028)  gear yaw = -0.02513
-#   rotor3: (+0.028, +0.028)  gear yaw = +0.02513
 
 def wrench_to_rotors(u):
     T, tx, ty, tz = u
@@ -95,9 +80,7 @@ def wrench_to_rotors(u):
 
     return np.array([u0, u1, u2, u3])
 
-# ==============================
-# MPC Controller
-# ==============================
+# mpc
 class MPC:
     def __init__(self, horizon=50):
         self.N = horizon
@@ -114,7 +97,7 @@ class MPC:
         # Control cost
         self.R = 0.01 * np.eye(nu)
 
-        # Rate penalty: suppresses chattering between timesteps
+        # Rate penalty
         self.Rdu = 0.1 * np.eye(nu)
 
         # Integral action weights [x, y, z, yaw]
@@ -136,22 +119,19 @@ class MPC:
             self.integral_error, -self.integral_clip, self.integral_clip
         )
 
-        # Tilt compensation: the linearized model assumes thrust acts purely
-        # in world-z. When the drone tilts by (roll, pitch), effective vertical
-        # thrust becomes T*cos(roll)*cos(pitch), so we must command more thrust
-        # to maintain altitude. This is the primary cause of z steady-state error.
+        # Tilt compensation
         roll  = x0[3]
         pitch = x0[4]
         cos_tilt = np.cos(roll) * np.cos(pitch)
-        cos_tilt = np.clip(cos_tilt, 0.5, 1.0)  # safety: avoid division by ~0
+        cos_tilt = np.clip(cos_tilt, 0.5, 1.0)  # prevent divide by 0
         tilt_thrust = m * g / cos_tilt           # thrust needed to hold altitude
 
         # Feedforward wrench: tilt-compensated gravity + integral corrections
         u_ff = np.array([
             (tilt_thrust - m*g) + self.Ki[2] * self.integral_error[2],  # z
-            -self.Ki[1] * self.integral_error[1],  # y error -> roll torque
-             self.Ki[0] * self.integral_error[0],  # x error -> pitch torque
-            self.Ki[3] * self.integral_error[3],   # yaw error -> yaw torque
+            -self.Ki[1] * self.integral_error[1],  # y error = roll torque
+             self.Ki[0] * self.integral_error[0],  # x error = pitch torque
+            self.Ki[3] * self.integral_error[3],   # yaw error = yaw torque
         ])
         u_hover = np.array([m*g, 0.0, 0.0, 0.0]) + u_ff
 
@@ -196,34 +176,25 @@ class MPC:
 
 mpc = MPC()
 
-# ==============================
-# Target hover point
-# ==============================
+# target hover
 x_ref = np.zeros(nx)
 x_ref[0] = 0.5
 x_ref[1] = -0.5
 x_ref[2] = 1.0
 x_ref[5] = 0.0  # desired yaw
 
-# ==============================
-# Diagnostic print
-# ==============================
+# diagnostics - remove when not needed
 test_u = wrench_to_rotors(np.array([m*g, 0, 0, 0]))
 print(f"m={m:.4f} kg, g={g:.4f} m/s^2, m*g={m*g:.4f} N")
 print(f"Hover rotor commands: {test_u}")
 print(f"Rotor sum: {sum(test_u):.4f} N  (should equal m*g={m*g:.4f} N)")
 print(f"HOVER constant: {HOVER:.4f} N per rotor")
 
-# ==============================
-# Logging
-# ==============================
+
 states   = []
 controls = []
 times    = []
 
-# ==============================
-# Simulation
-# ==============================
 
 # Check actuator gear and control range
 print("Actuator gear vectors:")
@@ -233,10 +204,6 @@ for i in range(model.nu):
 print(f"\nControl range: {model.actuator_ctrlrange}")
 print(f"Force range:   {model.actuator_forcerange}")
 
-# Manually verify: what thrust does ctrl=0.0662 actually produce?
-# For a general actuator: force = gear * ctrl
-# gear[2] = 1.0, so force_z = 1.0 * ctrl
-# But check if there's a forcerange clamp or biasprm scaling
 print(f"\nActuator biasprm: {model.actuator_biasprm}")
 print(f"Actuator gainprm: {model.actuator_gainprm}")
 
@@ -270,16 +237,10 @@ with mujoco.viewer.launch_passive(model, data) as viewer:
         viewer.sync()
         t += DT_CTRL
 
-# ==============================
-# Convert logs
-# ==============================
 states   = np.array(states)
 controls = np.array(controls)
 times    = np.array(times)
 
-# ==============================
-# Plot: Position
-# ==============================
 plt.figure()
 plt.plot(times, states[:,0], label="x")
 plt.plot(times, states[:,1], label="y")
@@ -293,9 +254,6 @@ plt.ylabel("Position (m)")
 plt.legend()
 plt.grid()
 
-# ==============================
-# Plot: Orientation
-# ==============================
 plt.figure()
 plt.plot(times, states[:,3], label="roll")
 plt.plot(times, states[:,4], label="pitch")
@@ -307,9 +265,6 @@ plt.ylabel("Angle (rad)")
 plt.legend()
 plt.grid()
 
-# ==============================
-# Plot: Controls
-# ==============================
 plt.figure()
 for i in range(4):
     plt.plot(times, controls[:,i], label=f"rotor {i}", alpha=0.7)

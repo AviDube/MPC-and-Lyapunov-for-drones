@@ -1,10 +1,5 @@
 """
-benchmark_hybrid.py
-────────────────────
-Run from the hybrid_mpc/ directory:
-    cd hybrid_mpc
-    cp ../benchmark_plots.py .
-    python benchmark_hybrid.py
+Benchmark script for Hybrid MPC controller.
 """
 
 import time
