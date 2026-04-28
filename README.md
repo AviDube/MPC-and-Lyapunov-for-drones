@@ -30,7 +30,7 @@ cd hybrid_mpc
 python benchmark_hybrid.py
 ```
 
-This will generate benchmark_hybrid_summary.png and benchmark_hybrid_tracking.png files with the benchmark results.
+This will generate benchmark_hybrid_summary.png and benchmark_hybrid_tracking.png files with the benchmark results. 
 
 To generate the safety certificate, run the following from the main directory. _Please note that this took over 3 days to run on our machine. If you would like to view the results, they are found in the hybrid_mpc/certificate_outputs subdirectory._
 ```
