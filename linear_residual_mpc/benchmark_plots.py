@@ -1,16 +1,5 @@
 """
-benchmark_plots.py
-──────────────────
-Shared plotting logic used by all three benchmark files.
-Copy this file into whichever subdirectory you are benchmarking from,
-alongside the benchmark_*.py file.
-
-Main entry point:
-    plot_all_trajectories(all_results, controller_label, save_prefix)
-
-where all_results is a dict:
-    { traj_name: { "times": [...], "states": [...], "refs": [...],
-                   "solve_times": [...], "metrics": {...} } }
+Plotting utilities for visualizing the benchmark results of the linear + residual MPC controller.
 """
 
 import numpy as np
@@ -26,13 +15,11 @@ COLORS  = {
 }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Per-trajectory plot: 4-row figure
 #   Row 1: x, y, z position vs reference
 #   Row 2: roll, pitch, yaw vs reference
 #   Row 3: position error magnitude + settling time marker
 #   Row 4: solve time per step
-# ══════════════════════════════════════════════════════════════════════════════
 def plot_trajectory(result, traj_name, controller_label, ax_array):
     """
     Fill a column of 4 axes for one trajectory.
@@ -46,7 +33,7 @@ def plot_trajectory(result, traj_name, controller_label, ax_array):
 
     ax_pos, ax_att, ax_err, ax_solve = ax_array
 
-    # ── Row 1: position tracking ──────────────────────────────────────────────
+    # row 1
     for i, (lbl, col) in enumerate(zip(["x","y","z"],
                                        [COLORS["x"],COLORS["y"],COLORS["z"]])):
         ax_pos.plot(times, states[:,i], color=col, lw=1.4, label=f"{lbl}")
@@ -57,7 +44,7 @@ def plot_trajectory(result, traj_name, controller_label, ax_array):
     ax_pos.grid(alpha=0.25); ax_pos.set_xlim(times[0], times[-1])
     ax_pos.set_title(traj_name.replace("_"," "), fontsize=10, fontweight="500")
 
-    # ── Row 2: attitude tracking ───────────────────────────────────────────────
+    # row 2
     for i, (lbl, col) in enumerate(zip(["roll","pitch","yaw"],
                                        [COLORS["roll"],COLORS["pitch"],
                                         COLORS["yaw"]])):
@@ -69,7 +56,7 @@ def plot_trajectory(result, traj_name, controller_label, ax_array):
     ax_att.legend(fontsize=7, ncol=3, loc="upper right")
     ax_att.grid(alpha=0.25); ax_att.set_xlim(times[0], times[-1])
 
-    # ── Row 3: position error + settling time ─────────────────────────────────
+    # row 3
     pos_err = np.linalg.norm(states[:,:3] - refs[:,:3], axis=1)
     ax_err.plot(times, pos_err*100, color=COLORS["err"], lw=1.4,
                 label="pos error")
@@ -101,7 +88,7 @@ def plot_trajectory(result, traj_name, controller_label, ax_array):
                 transform=ax_err.transAxes,
                 fontsize=7, color=COLORS["err"])
 
-    # ── Row 4: solve time ─────────────────────────────────────────────────────
+    # row 4
     solve_ms = np.array(st) * 1e3
     ax_solve.plot(times, solve_ms, color="#888780", lw=0.8, alpha=0.7)
     ax_solve.axhline(DT_CTRL*1e3, color="#E24B4A", lw=1.0, ls="--",
@@ -115,9 +102,7 @@ def plot_trajectory(result, traj_name, controller_label, ax_array):
     ax_solve.set_ylim(bottom=0)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Summary bar chart: one bar per trajectory for each key metric
-# ══════════════════════════════════════════════════════════════════════════════
+# summary chart bar plot: one bar per trajectory, for each metric
 def plot_summary(all_results, controller_label, color):
     trajs   = list(all_results.keys())
     metrics = ["pos_rmse","att_rmse","peak_err","settling_s","solve_ms_mean"]
@@ -148,9 +133,7 @@ def plot_summary(all_results, controller_label, color):
     return fig
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Master function
-# ══════════════════════════════════════════════════════════════════════════════
+# orchestrator
 def plot_all_trajectories(all_results, controller_label, save_prefix,
                           color="#378ADD"):
     trajs  = list(all_results.keys())

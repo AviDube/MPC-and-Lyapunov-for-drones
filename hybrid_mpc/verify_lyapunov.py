@@ -1,33 +1,5 @@
 """
-verify_lyapunov.py
-──────────────────
-Run from hybrid_mpc/:
-    cd hybrid_mpc
-    python verify_lyapunov.py
-
-Produces four diagnostic figures:
-
-  Figure 1 — V(e) level sets in 2D slices
-    Left:   position error plane (ex, ez)
-    Centre: velocity error plane (evx, evz)
-    Right:  attitude error plane (e_roll, e_pitch)
-
-  Figure 2 — V decrease along sampled trajectories
-    Rolls out 12 closed-loop trajectories from random initial errors.
-    V should decrease initially; trajectories that leave the certified
-    region (V > c_ROA) are marked with a vertical grey line — growth
-    beyond that point is expected and does NOT indicate certificate failure.
-
-  Figure 3 — Violation map in position error plane
-    Red: decrease condition violated
-    Blue: positive definiteness violated
-    Green: certified
-
-  Figure 4 — Region of attraction estimate
-    Largest level set {e: V(e) <= c} where decrease holds for >= 99%
-    of sampled states.
-
-Saved to models/.
+This script generates the figures for the Lyapunov verification.
 """
 
 import os
@@ -51,7 +23,7 @@ Ix,Iy,Iz = INERTIA
 os.makedirs("models", exist_ok=True)
 
 
-# ── model definitions ─────────────────────────────────────────────────────────
+# model definitions 
 class NeuralPolicy(nn.Module):
     def __init__(self, nx=12, hidden=128, n_layers=3):
         super().__init__()
@@ -89,8 +61,6 @@ class LyapunovNet(nn.Module):
         feat=self.phi(e); Wf=feat@self.W.T
         return (Wf**2).sum(dim=1,keepdim=True)
 
-
-# ── physics ───────────────────────────────────────────────────────────────────
 def _R(phi,theta,psi):
     cp=torch.cos(phi);sp=torch.sin(phi);ct=torch.cos(theta)
     cy=torch.cos(psi);sy=torch.sin(psi);st=torch.sin(theta)
@@ -137,8 +107,6 @@ def make_cl_step(policy,nn_res,xu_mean,xu_std,x_ref_t,e_scale_t,delta_eq):
         return (xn-xrb)/e_scale_t
     return cl_step
 
-
-# ── load ──────────────────────────────────────────────────────────────────────
 def load_all(device):
     cfg     = np.load("models/policy_config.npz")
     e_scale = torch.from_numpy(cfg["e_scale"]).float().to(device)
@@ -175,7 +143,7 @@ def load_all(device):
     return V_net, cl_step, alpha, e_scale
 
 
-# ── Figure 1: level sets ───────────────────────────────────────────────────────
+# Figure 1: level sets
 def fig_level_sets(V_net, cl_step, alpha, device):
     N = 100
     slices = [
@@ -217,16 +185,11 @@ def fig_level_sets(V_net, cl_step, alpha, device):
     print("Saved → models/lyapunov_level_sets.png")
 
 
-# ── Figure 2: V decrease along trajectories ────────────────────────────────────
+# Figure 2: V decrease along trajectories
 def fig_decrease(V_net, cl_step, alpha, device,
                  n_traj=12, T_steps=80, c_roa=5.0):
     """
     Rolls out n_traj trajectories and plots V(e_k) on a log scale.
-
-    Key addition: a vertical grey line is drawn at the step where each
-    trajectory first exits the certified region {V <= c_roa}.  Growth
-    after that line is expected — the certificate only applies inside the
-    ROA, not outside it.
     """
     fig, ax = plt.subplots(figsize=(9, 4.5))
     rng     = np.random.default_rng(42)
@@ -256,7 +219,7 @@ def fig_decrease(V_net, cl_step, alpha, device,
             ax.axvline(exit_k, color=colors[i], lw=0.8,
                        ls=":", alpha=0.5)
 
-    # Theoretical decay envelope anchored at median V(e_0)
+    # Theoretical decay envelope anchored at median
     t_arr    = np.arange(T_steps)
     ax.plot(c_roa * (1-alpha)**t_arr, "k--", lw=2.0,
             label=f"$(1-\\alpha)^t \\cdot c_{{ROA}}$  α={alpha}")
@@ -298,7 +261,7 @@ def fig_decrease(V_net, cl_step, alpha, device,
               f"({mean_exit*DT_CTRL:.2f}s)")
 
 
-# ── Figure 3: violation map ────────────────────────────────────────────────────
+# Figure 3: violation map
 def fig_violation_map(V_net, cl_step, alpha, device):
     N   = 120
     rng = np.linspace(-0.6, 0.6, N)
@@ -358,15 +321,11 @@ def fig_violation_map(V_net, cl_step, alpha, device):
     print("Saved → models/lyapunov_violation_map.png")
 
 
-# ── Stratified sampler ────────────────────────────────────────────────────────
+# Stratified sampler 
 def stratified_sample(shells, nx, device):
     """
     Sample states in concentric shells of increasing radius so that
-    every level set — including tiny inner ones — gets adequate coverage.
-
-    shells: list of (r_min, r_max, n_samples)
-    Strategy: uniform random direction on the unit sphere, scaled to
-    a radius drawn uniformly in [r_min, r_max].
+    every level set gets adequate coverage.
     """
     all_e = []
     for r_min, r_max, n in shells:
@@ -377,7 +336,7 @@ def stratified_sample(shells, nx, device):
     return torch.cat(all_e, dim=0)
 
 
-# ── Figure 4: ROA estimate ─────────────────────────────────────────────────────
+# Figure 4: ROA estimate 
 def fig_roa(V_net, cl_step, alpha, device):
     print("\n── Region of Attraction estimate (stratified sampling) ──")
 
@@ -464,7 +423,6 @@ def fig_roa(V_net, cl_step, alpha, device):
     print("Saved → models/lyapunov_roa.png")
 
 
-# ── Summary ───────────────────────────────────────────────────────────────────
 def print_summary(V_net, cl_step, alpha, device):
     print("\n── Certificate summary (stratified samples) ──")
 
@@ -498,7 +456,7 @@ def print_summary(V_net, cl_step, alpha, device):
           f"({np.log(0.5)/np.log(1-alpha)*DT_CTRL:.2f}s)")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# main
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()

@@ -1,10 +1,5 @@
 """
-benchmark_residual.py
-──────────────────────
-Run from the linear_residual_mpc/ directory:
-    cd linear_residual_mpc
-    cp ../benchmark_plots.py .
-    python benchmark_residual.py
+Benchmarking script for the linear + residual MPC controller.
 """
 
 import time

@@ -1,12 +1,6 @@
 """
-train_residual.py
-─────────────────
 Trains a small MLP to predict the residual between the true next state
-and what the linearized model predicts:
-
-    δ_t = x_{t+1} - (Ad @ x_t + Bd @ u_t + c)
-    NN(x_t, u_t) → δ_t
-
+and what the linearized model predicts.
 Usage:
     python train_residual.py                        # uses data/transitions.npz
     python train_residual.py --data data/run2.npz   # custom data path
@@ -25,7 +19,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import matplotlib.pyplot as plt
 
-# ── linearized model (must match your controller exactly) ─────────────────────
+# linearized model
 import mujoco
 
 XML_PATH = "../basic_quadrotor.xml"
@@ -49,17 +43,11 @@ Bd = B * DT_CTRL
 c  = np.zeros(nx); c[8] = -g * DT_CTRL   # gravity correction term
 
 
-# ── network definition ────────────────────────────────────────────────────────
+# network definition
 class ResidualNN(nn.Module):
     """
-    Small MLP: (x, u) → δ
     Input  dim: nx + nu = 16
     Output dim: nx      = 12
-
-    Two hidden layers of 64 units with layer norm + ELU activation.
-    Layer norm (vs batch norm) is important here because at MPC solve time
-    we do single-sample forward passes — batch norm would behave differently
-    during training vs inference.
     """
     def __init__(self, nx=12, nu=4, hidden=64):
         super().__init__()
@@ -80,7 +68,7 @@ class ResidualNN(nn.Module):
         return self.net(xu)
 
 
-# ── normalisation helpers ─────────────────────────────────────────────────────
+# normalization helper
 class Normalizer:
     def __init__(self, mean, std):
         self.mean = mean
@@ -98,11 +86,10 @@ class Normalizer:
         return Normalizer(d["mean"], d["std"])
 
 
-# ── training ──────────────────────────────────────────────────────────────────
+# training
 def train(args):
     os.makedirs("models", exist_ok=True)
 
-    # ── load data ─────────────────────────────────────────────────────────────
     d = np.load(args.data)
     X      = d["X"]          # (N, 12)
     U      = d["U_wrench"]   # (N,  4)  — wrench [T, tx, ty, tz]
@@ -111,17 +98,14 @@ def train(args):
     N = len(X)
     print(f"Loaded {N} transitions from {args.data}")
 
-    # ── compute residuals ─────────────────────────────────────────────────────
-    # x_lin = Ad @ x + Bd @ u + c  (vectorised over batch)
     X_lin = (Ad @ X.T).T + (Bd @ U.T).T + c    # (N, 12)
-    delta  = X_next - X_lin                      # (N, 12)  ← learning target
+    delta  = X_next - X_lin                      # (N, 12)
 
     print(f"Residual stats (per dim):")
     print(f"  mean  = {delta.mean(axis=0).round(4)}")
     print(f"  std   = {delta.std(axis=0).round(4)}")
     print(f"  max|δ|= {np.abs(delta).max(axis=0).round(4)}")
 
-    # ── build input/output tensors ────────────────────────────────────────────
     XU = np.concatenate([X, U], axis=1).astype(np.float32)  # (N, 16)
     D  = delta.astype(np.float32)                            # (N, 12)
 
@@ -139,7 +123,6 @@ def train(args):
     train_loader = DataLoader(train_ds, batch_size=args.batch, shuffle=True)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch)
 
-    # ── model / optimiser ─────────────────────────────────────────────────────
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     net    = ResidualNN(nx=nx, nu=nu, hidden=args.hidden).to(device)
     opt    = torch.optim.Adam(net.parameters(), lr=args.lr, weight_decay=1e-5)
@@ -189,7 +172,7 @@ def train(args):
 
     print(f"\nBest val loss: {best_val:.4e}  →  models/residual_nn.pt")
 
-    # ── plot ──────────────────────────────────────────────────────────────────
+    # plot
     plt.figure(figsize=(8, 3))
     plt.plot(train_losses, label="train")
     plt.plot(val_losses,   label="val")
@@ -200,7 +183,6 @@ def train(args):
     plt.savefig("models/training_curve.png", dpi=120)
     plt.show()
 
-    # ── quick sanity: per-dimension RMSE on val set ───────────────────────────
     net.load_state_dict(torch.load("models/residual_nn.pt", map_location=device))
     net.eval()
     all_pred, all_true = [], []

@@ -1,10 +1,5 @@
 """
-benchmark_linear.py
-────────────────────
-Run from the linear_mpc/ directory:
-    cd linear_mpc
-    cp ../benchmark_plots.py .
-    python benchmark_linear.py
+Benchmarking script for linear MPC controller on various trajectories.
 """
 
 import time
@@ -27,7 +22,6 @@ def reset_sim(d):
     mujoco.mj_forward(mj_model, d)
 
 
-# ── trajectories ──────────────────────────────────────────────────────────────
 def make_trajectory(name, duration):
     T = duration
     if name == "hover":

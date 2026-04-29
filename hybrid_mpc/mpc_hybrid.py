@@ -1,22 +1,5 @@
 """
-mpc_hybrid.py
-─────────────
 MPC using the hybrid physics + NN dynamics model.
-
-The dynamics constraint inside the NLP is:
-
-    x_{k+1} = RK4(f_physics)(x_k, u_k) + f_theta(x_k, u_k)
-
-Both terms are CasADi symbolic expressions — IPOPT differentiates
-through the full hybrid model automatically.
-
-Advantages over pure NN MPC:
-  - Physics term is always physically consistent → better initial guess,
-    faster IPOPT convergence, fewer iterations needed
-  - NN is smaller (64 hidden, 3 layers vs 128 hidden, 4 layers)
-    → faster forward pass → lower per-iteration cost
-  - Full rotation matrix in physics → no linearisation error even at
-    large attitude angles → better tracking during aggressive manoeuvres
 """
 
 import numpy as np
@@ -31,17 +14,14 @@ import torch.nn as nn
 
 from physics import build_physics_fn, rk4_ca
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Config
 # ══════════════════════════════════════════════════════════════════════════════
 XML_PATH = "../basic_quadrotor_presentation.xml"
 DT_CTRL  = 0.02
 SIM_TIME = 8.0
-HORIZON  = 25    # can use a longer horizon than pure NN MPC — faster per step
+HORIZON  = 25   
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Load MuJoCo
-# ══════════════════════════════════════════════════════════════════════════════
 mj_model = mujoco.MjModel.from_xml_path(XML_PATH)
 mj_data  = mujoco.MjData(mj_model)
 
@@ -52,9 +32,6 @@ HOVER    = MASS * GRAV / 4
 
 nx, nu = 12, 4
 
-# ══════════════════════════════════════════════════════════════════════════════
-# State helpers
-# ══════════════════════════════════════════════════════════════════════════════
 def quat_to_euler(q):
     w,x,y,z = q
     return Rotation.from_quat([x,y,z,w]).as_euler("xyz")
@@ -71,9 +48,7 @@ def wrench_to_rotors(u):
                      T/4+tx/(4*l)+ty/(4*l)-tz/(4*k),
                      T/4+tx/(4*l)-ty/(4*l)+tz/(4*k)])
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Build CasADi expression for the NN residual
-# ══════════════════════════════════════════════════════════════════════════════
+# casadi functions for physics + NN residuals
 class HybridResidualNN(nn.Module):
     def __init__(self, nx=12, nu=4, hidden=64, n_layers=3):
         super().__init__()
@@ -88,7 +63,6 @@ class HybridResidualNN(nn.Module):
 
 
 def silu_ca(x):
-    """SiLU (Swish) in CasADi: x * sigmoid(x)."""
     return x / (1 + ca.exp(-x))
 
 
@@ -100,10 +74,6 @@ def linear_ca(x, layer):
 
 def build_nn_residual_fn(weights_path="models/hybrid_nn.pt",
                           config_path="models/hybrid_config.npz"):
-    """
-    Load trained weights and build CasADi Function:
-        f_nn(x, u) → delta   (physical units, unnormalised)
-    """
     cfg      = np.load(config_path)
     hidden   = int(cfg["hidden"][0])
     n_layers = int(cfg["n_layers"][0])
@@ -132,7 +102,6 @@ def build_nn_residual_fn(weights_path="models/hybrid_nn.pt",
             h = silu_ca(h)
         # ignore any other layer types
 
-    # h is the delta (no output normalisation needed — target was raw delta)
     delta_sym = h
 
     return ca.Function("f_nn_residual", [x_sym, u_sym], [delta_sym],
@@ -140,10 +109,6 @@ def build_nn_residual_fn(weights_path="models/hybrid_nn.pt",
 
 
 def build_hybrid_fn(f_physics, f_nn):
-    """
-    Combine physics + NN into a single CasADi Function:
-        f_hybrid(x, u) → x_next = RK4_physics(x,u) + NN(x,u)
-    """
     x_sym = ca.MX.sym("x", nx)
     u_sym = ca.MX.sym("u", nu)
 
@@ -155,9 +120,7 @@ def build_hybrid_fn(f_physics, f_nn):
                        ["x", "u"], ["x_next"])
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Load models
-# ══════════════════════════════════════════════════════════════════════════════
+
 print("Building hybrid CasADi model...")
 f_physics = build_physics_fn(MASS, INERTIA, GRAV, DT_CTRL)
 
@@ -171,9 +134,7 @@ except FileNotFoundError:
     f_hybrid = f_physics
     USE_NN   = False
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Build NLP
-# ══════════════════════════════════════════════════════════════════════════════
+
 def build_nlp(horizon=HORIZON):
     N = horizon
 
@@ -265,9 +226,7 @@ print(f"NLP built in {time.time()-t0:.1f}s\n")
 N = meta["N"]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # MPC
-# ══════════════════════════════════════════════════════════════════════════════
 class HybridMPC:
     def __init__(self):
         self.w0     = None
@@ -326,9 +285,7 @@ class HybridMPC:
         return w_opt[meta["n_x_vars"]:].reshape(N, nu)[0]
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Simulation
-# ══════════════════════════════════════════════════════════════════════════════
 mpc   = HybridMPC()
 x_ref = np.zeros(nx)
 x_ref[0]=0.5; x_ref[1]=-0.5; x_ref[2]=1.0; x_ref[5]=0.0

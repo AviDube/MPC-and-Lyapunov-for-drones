@@ -1,34 +1,5 @@
 """
-residual_lyap_policy.py
-────────────────────────
-Run from hybrid_mpc/:
-    python residual_lyap_policy.py
-
-Jointly trains a residual policy and a Lyapunov function:
-
-    pi(e) = u* + delta_u(e)          residual policy, delta_u(0)=0
-    V(e)  = ||W * phi(e)||^2         Lyapunov function, V(0)=0 exactly
-
-The e_next used in the Lyapunov decrease condition is computed using
-the full hybrid dynamics model:
-
-    x_next = RK4_physics(x, u) + f_theta(x, u) - delta*
-
-where f_theta is your trained hybrid NN residual and delta* is the
-equilibrium correction ensuring x_next = x* when (x,u) = (x*, u*).
-Gradients flow through both physics and f_theta into the Lyapunov loss,
-so the policy is shaped by the actual nonlinear dynamics rather than
-a linearised approximation.
-
-Loss has three terms:
-    L_imitate  — MSE to MPC demonstrations
-    L_decrease — penalise V(e_next) > (1-alpha)*V(e)
-    L_pd       — penalise V(e) < eps outside tiny ball
-
-Outputs:
-    models/residual_policy.pt
-    models/lyapunov_function.pt
-    models/policy_lyap_config.npz
+Distillation of a residual policy + Lyapunov function from the hybrid MPC controller.
 """
 
 import os
@@ -59,7 +30,6 @@ os.makedirs("models", exist_ok=True)
 
 _x_ref = torch.from_numpy(X_REF)
 
-# ── Hybrid NN residual (same architecture as train_hybrid.py) ─────────────────
 class HybridResidualNN(nn.Module):
     def __init__(self, nx=12, nu=4, hidden=64, n_layers=3):
         super().__init__()
@@ -71,7 +41,6 @@ class HybridResidualNN(nn.Module):
     def forward(self, xu): return self.net(xu)
 
 
-# ── Differentiable physics step (PyTorch, batched) ────────────────────────────
 def _rot(phi, theta, psi):
     cp=torch.cos(phi); sp=torch.sin(phi)
     ct=torch.cos(theta); st=torch.sin(theta)
@@ -92,7 +61,6 @@ def _wmat(phi, theta):
     return W
 
 def physics_step(x_abs, u, dt=DT_CTRL):
-    """Full nonlinear RK4 physics step, batched and differentiable."""
     def ode(x, u):
         phi=x[:,3]; theta=x[:,4]; psi=x[:,5]
         p=x[:,9];   q=x[:,10];   r=x[:,11]
@@ -115,7 +83,6 @@ def physics_step(x_abs, u, dt=DT_CTRL):
 
 
 def load_hybrid_nn(device):
-    """Load hybrid NN residual + scalers. Returns (nn_res, xu_mean, xu_std, delta_eq)."""
     cfg     = np.load("models/hybrid_config.npz")
     nn_res  = HybridResidualNN(hidden=int(cfg["hidden"][0]),
                                 n_layers=int(cfg["n_layers"][0])).to(device)
@@ -137,25 +104,13 @@ def load_hybrid_nn(device):
 
 
 def hybrid_next(x_abs, u, nn_res, xu_mean, xu_std, delta_eq):
-    """
-    One step of the hybrid dynamics:
-        x_next = RK4_physics(x, u) + f_theta(x, u) - delta*
-
-    The equilibrium correction ensures x_next = x* when x=x*, u=u*.
-    Both physics and NN are differentiable so gradients flow through
-    this into the Lyapunov decrease loss.
-    """
     x_phys  = physics_step(x_abs, u)
     xu_n    = (torch.cat([x_abs, u], 1) - xu_mean) / xu_std
     delta   = nn_res(xu_n)
     return x_phys + delta - delta_eq
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Networks
-# ══════════════════════════════════════════════════════════════════════════════
 class ResidualPolicy(nn.Module):
-    """pi(e) = u* + delta_u(e),  delta_u(0)=0 by construction."""
     def __init__(self, nx=12, hidden=128, n_layers=3):
         super().__init__()
         layers = [nn.Linear(nx, hidden), nn.Tanh()]
@@ -172,13 +127,7 @@ class ResidualPolicy(nn.Module):
 
 
 class LyapunovFunction(nn.Module):
-    """
-    V(e) = ||W * phi(e)||^2
 
-    phi has no bias in final layer  =>  phi(0)=0  =>  V(0)=0 exactly.
-    This satisfies the first Lyapunov condition by construction, unlike
-    torch.abs(net(e)) + eps which can never reach zero.
-    """
     def __init__(self, nx=12, hidden=128, feat_dim=64):
         super().__init__()
         self.phi = nn.Sequential(
@@ -194,9 +143,7 @@ class LyapunovFunction(nn.Module):
         return (Wf**2).sum(dim=1, keepdim=True)   # (B,1), >=0, =0 at e=0
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Data collection
-# ══════════════════════════════════════════════════════════════════════════════
+
 def collect(n_episodes=15):
     offsets = [
         [0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [-0.5, 0.0, 0.0],
@@ -234,9 +181,6 @@ def collect(n_episodes=15):
     return E_all, U_all
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Training
-# ══════════════════════════════════════════════════════════════════════════════
 def train(n_episodes=15, epochs=300, lr=3e-4, hidden=128, n_layers=3,
           alpha=0.05, lambda_lyap=5.0, lambda_pd=1.0, eps_pd=0.01):
 
@@ -294,9 +238,6 @@ def train(n_episodes=15, epochs=300, lr=3e-4, hidden=128, n_layers=3,
             # Imitation loss
             L_imitate = nn.functional.mse_loss(u_pred, u_mpc)
 
-            # e_next via hybrid dynamics (physics + NN residual)
-            # Gradients flow back through both physics and nn_res into
-            # the Lyapunov decrease loss, shaping the policy during training.
             x_abs    = e_n * e_scale_d + x_ref_d
             x_next   = hybrid_next(x_abs, u_pred, nn_res, xu_mean, xu_std, delta_eq)
             e_next_n = (x_next - x_ref_d) / e_scale_d

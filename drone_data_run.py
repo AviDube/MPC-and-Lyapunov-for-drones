@@ -1,3 +1,7 @@
+"""
+Data collection script for basic quadrotor dynamics.
+"""
+
 import os
 os.environ["MUJOCO_GL"] = "glfw"
 
@@ -6,9 +10,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 from tqdm import tqdm
 
-# ==============================
 # Config
-# ==============================
 XML_PATH       = "basic_quadrotor.xml"
 DT_SIM         = 0.002
 DT_CTRL        = 0.02
@@ -23,16 +25,11 @@ EPISODE_LEN  = 150
 SAVE_PATH = "dataset"
 os.makedirs(SAVE_PATH, exist_ok=True)
 
-# ==============================
 # Load base model
-# ==============================
 base_model = mujoco.MjModel.from_xml_path(XML_PATH)
 HOVER = (base_model.body_mass[1] * abs(base_model.opt.gravity[2])) / 4
 print(f"Nominal hover thrust per rotor: {HOVER:.5f} N")
 
-# ==============================
-# State extraction
-# ==============================
 def get_state(data):
     pos   = data.qpos[:3]
     quat  = data.qpos[3:7]   # (w, x, y, z)
@@ -40,9 +37,6 @@ def get_state(data):
     omega = data.qvel[3:6]
     return np.concatenate([pos, quat, vel, omega])
 
-# ==============================
-# Rotor -> Wrench
-# ==============================
 def rotors_to_wrench(u):
     l = 0.028
     k = 0.02513
@@ -53,9 +47,7 @@ def rotors_to_wrench(u):
     tz = k * (-u0 + u1 - u2 + u3)
     return np.array([T, tx, ty, tz])
 
-# ==============================
 # Setpoint sampling
-# ==============================
 SETPOINT_Z_MIN    = 0.05
 SETPOINT_Z_MAX    = 5
 SETPOINT_XY_RANGE = 5.0
@@ -67,9 +59,7 @@ def sample_setpoint():
         np.random.uniform(SETPOINT_Z_MIN, SETPOINT_Z_MAX),
     ])
 
-# ==============================
 # Domain randomization
-# ==============================
 def make_randomized_model(xml_path):
     model = mujoco.MjModel.from_xml_path(xml_path)
     m_nom = 0.027
@@ -81,9 +71,7 @@ def make_randomized_model(xml_path):
     model.opt.viscosity *= np.random.uniform(0.8, 1.2)
     return model
 
-# ==============================
 # Initial state
-# ==============================
 def sample_initial_state(data, model, setpoint):
     mujoco.mj_resetData(model, data)
     data.qpos[0] = setpoint[0] + np.random.uniform(-0.5, 0.5)
@@ -95,9 +83,7 @@ def sample_initial_state(data, model, setpoint):
     data.qpos[3:7] = [q[3], q[0], q[1], q[2]]
     data.qvel[:] = np.random.uniform(-1.0, 1.0, 6)
 
-# ==============================
 # Smoothed random rotor input
-# ==============================
 class RandomRotorInput:
     def __init__(self, t_min=T_MIN, t_max=T_MAX, alpha=0.9):
         self.t_min = t_min
@@ -112,9 +98,7 @@ class RandomRotorInput:
         self.prev_u = u
         return u
 
-# ==============================
 # Episode rollout
-# ==============================
 def run_episode(rotor_input):
     model = make_randomized_model(XML_PATH)
     data = mujoco.MjData(model)
@@ -147,9 +131,7 @@ def run_episode(rotor_input):
 
     return transitions
 
-# ==============================
 # Collect dataset
-# ==============================
 all_states, all_actions, all_next_states, all_xdot = [], [], [], []
 rotor_input = RandomRotorInput()
 
@@ -162,17 +144,12 @@ for _ in pbar:
     all_next_states.extend(s1)
     all_xdot.extend(xd)
 
-# ==============================
-# Convert to arrays
-# ==============================
 states      = np.array(all_states, dtype=np.float32)
 actions     = np.array(all_actions, dtype=np.float32)
 next_states = np.array(all_next_states, dtype=np.float32)
 xdot        = np.array(all_xdot, dtype=np.float32)
 
-# ==============================
-# Subsample (optional)
-# ==============================
+# subsample if dataset is too large
 TARGET = 300_000
 if len(states) > TARGET:
     idx = np.random.choice(len(states), TARGET, replace=False)
@@ -181,9 +158,7 @@ if len(states) > TARGET:
     next_states = next_states[idx]
     xdot        = xdot[idx]
 
-# ==============================
 # Save dataset
-# ==============================
 np.save(f"{SAVE_PATH}/states.npy", states)
 np.save(f"{SAVE_PATH}/actions.npy", actions)
 np.save(f"{SAVE_PATH}/next_states.npy", next_states)
@@ -195,37 +170,35 @@ print(" actions:", actions.shape)
 print(" next_states:", next_states.shape)
 print(" xdot:", xdot.shape)
 
-# ==============================
 # Dataset quality metrics
-# ==============================
 def evaluate_dataset(states, actions, xdot):
     print("\n==== Dataset Quality Metrics ====")
 
-    # 1. Position coverage
+    # Position coverage
     print("\nPosition ranges:")
     print(f"x: {states[:,0].min():.3f} → {states[:,0].max():.3f}")
     print(f"y: {states[:,1].min():.3f} → {states[:,1].max():.3f}")
     print(f"z: {states[:,2].min():.3f} → {states[:,2].max():.3f}")
 
-    # 2. Velocity coverage
+    # Velocity coverage
     print("\nVelocity ranges:")
     print(f"vx: {states[:,7].min():.3f} → {states[:,7].max():.3f}")
     print(f"vy: {states[:,8].min():.3f} → {states[:,8].max():.3f}")
     print(f"vz: {states[:,9].min():.3f} → {states[:,9].max():.3f}")
 
-    # 3. Rotor input distribution
+    # Rotor input distribution
     print("\nRotor input ranges:")
     for i in range(4):
         print(f"u{i}: {actions[:,i].min():.3f} → {actions[:,i].max():.3f}")
 
-    # 4. Dynamics excitation
+    # Dynamics excitation
     print("\nxdot stats (mean ± std):")
     mean_xdot = np.mean(xdot, axis=0)
     std_xdot  = np.std(xdot, axis=0)
     for i in range(len(mean_xdot)):
         print(f"xdot[{i}]: {mean_xdot[i]:.4f} ± {std_xdot[i]:.4f}")
 
-    # 5. NaNs or extreme values
+    # NaNs or extreme values
     print("\nSanity checks:")
     print(f"NaNs in states: {np.isnan(states).sum()}")
     print(f"NaNs in actions: {np.isnan(actions).sum()}")

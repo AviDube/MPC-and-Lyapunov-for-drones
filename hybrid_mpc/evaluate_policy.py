@@ -1,24 +1,5 @@
 """
-evaluate_policy.py
-──────────────────
-Run from hybrid_mpc/:
-    python evaluate_policy.py
-    python evaluate_policy.py --render
-
-Rolls out the jointly-trained residual policy (from residual_lyap_policy.py)
-directly in MuJoCo and compares it to HybridMPC on the same conditions.
-
-Loads from:
-    models/residual_policy.pt        — jointly trained policy
-    models/policy_lyap_config.npz    — e_scale, x_ref, u_star
-    models/lyapunov_function.pt      — jointly trained Lyapunov V
-      (falls back to lyapunov_net.pt if lyapunov_function.pt not found)
-
-Four rows per scenario:
-  1. Position tracking  — actual vs reference (solid=MPC, dashed=policy)
-  2. Position error     — cm, with 5cm settling threshold
-  3. Thrust command     — what each controller commands
-  4. Lyapunov V(e)      — along actual trajectory, with ROA boundary
+Evaluates the residual policy and Lyapunov function on MuJoCo rollouts.
 """
 
 import time
@@ -44,9 +25,7 @@ X_REF  = np.array([0.5,-0.5,1.0, 0,0,0, 0,0,0, 0,0,0], dtype=np.float32)
 U_STAR = np.array([MASS*GRAV, 0.0, 0.0, 0.0], dtype=np.float32)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Policy — matches ResidualPolicy in residual_lyap_policy.py exactly
-# ══════════════════════════════════════════════════════════════════════════════
+
 class ResidualPolicy(nn.Module):
     def __init__(self, nx=12, hidden=128, n_layers=3):
         super().__init__()
@@ -63,10 +42,7 @@ class ResidualPolicy(nn.Module):
 
 
 def load_policy():
-    """
-    Loads from policy_lyap_config.npz (joint training output).
-    Falls back to policy_config.npz (distil_policy.py output) if not found.
-    """
+
     for cfg_path, weights_path in [
         ("models/policy_lyap_config.npz", "models/residual_policy.pt"),
         ("models/policy_config.npz",      "models/neural_policy.pt"),
@@ -94,9 +70,6 @@ def policy_action(policy, e_scale, x):
     return u.squeeze(0).numpy()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Lyapunov V — matches LyapunovFunction in residual_lyap_policy.py
-# ══════════════════════════════════════════════════════════════════════════════
 class LyapunovFunction(nn.Module):
     def __init__(self, nx=12, hidden=128, feat_dim=64):
         super().__init__()
@@ -112,10 +85,7 @@ class LyapunovFunction(nn.Module):
 
 
 def load_lyapunov():
-    """
-    Tries lyapunov_function.pt (joint training) first,
-    then lyapunov_net.pt (separate training), then gives up gracefully.
-    """
+
     # Joint training config
     for weights_path, cfg_path, hidden, feat_dim, label in [
         ("models/lyapunov_function.pt", "models/policy_lyap_config.npz",
@@ -134,7 +104,7 @@ def load_lyapunov():
             else:
                 cfg     = np.load(cfg_path)
                 e_scale = cfg["e_scale"].astype(np.float32)
-                alpha   = 0.05   # default used in residual_lyap_policy.py
+                alpha   = 0.05 
                 c_roa   = 5.0
 
             V_net = LyapunovFunction(nx=nx, hidden=hidden, feat_dim=feat_dim)
@@ -157,9 +127,7 @@ def eval_V(V_net, e_scale, states):
     return V
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Simulation
-# ══════════════════════════════════════════════════════════════════════════════
 def reset(pos_offset=None):
     mj_data = mujoco.MjData(mj_model)
     mujoco.mj_resetData(mj_model, mj_data)
@@ -204,9 +172,7 @@ def run_mpc(pos_offset, duration=8.0):
             np.array(controls), np.array(solve_ms))
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Stats
-# ══════════════════════════════════════════════════════════════════════════════
 def print_stats(sc):
     def settle(err, times):
         w = int(0.5/DT_CTRL)
@@ -226,9 +192,7 @@ def print_stats(sc):
           f"solve:{sc['ms_mpc'].mean():.0f}ms")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # Plot
-# ══════════════════════════════════════════════════════════════════════════════
 def plot_comparison(scenarios, V_net, v_scale, alpha, c_roa):
     n_sc   = len(scenarios)
     colors = {"mpc": "#1D9E75", "policy": "#D85A30"}
@@ -255,7 +219,7 @@ def plot_comparison(scenarios, V_net, v_scale, alpha, c_roa):
             ax.legend(fontsize=7, ncol=2, loc="upper right")
         ax.grid(alpha=0.25); ax.set_xlim(0, t_p[-1])
 
-        # Row 1: position error
+        # position error
         ax = fig.add_subplot(gs[1, col])
         err_m = np.linalg.norm(s_m[:,:3]-X_REF[:3], axis=1)*100
         err_p = np.linalg.norm(s_p[:,:3]-X_REF[:3], axis=1)*100
@@ -270,7 +234,7 @@ def plot_comparison(scenarios, V_net, v_scale, alpha, c_roa):
             ax.legend(fontsize=7)
         ax.grid(alpha=0.25); ax.set_xlim(0, t_p[-1])
 
-        # Row 2: thrust
+        # thrust
         ax = fig.add_subplot(gs[2, col])
         ax.plot(t_m, u_m[:,0], color=colors["mpc"],    lw=1.8, label="MPC")
         ax.plot(t_p, u_p[:,0], color=colors["policy"], lw=1.5, ls="--",
@@ -282,7 +246,7 @@ def plot_comparison(scenarios, V_net, v_scale, alpha, c_roa):
             ax.legend(fontsize=7)
         ax.grid(alpha=0.25); ax.set_xlim(0, t_p[-1])
 
-        # Row 3: Lyapunov V
+        # Lyapunov V
         ax = fig.add_subplot(gs[3, col])
         if V_net is not None:
             V_m = eval_V(V_net, v_scale, s_m)
@@ -322,9 +286,7 @@ def plot_comparison(scenarios, V_net, v_scale, alpha, c_roa):
     print("Saved → models/policy_evaluation.png")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Main
-# ══════════════════════════════════════════════════════════════════════════════
+# main
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
